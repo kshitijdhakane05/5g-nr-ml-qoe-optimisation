@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# ns-3 build output
+build/
+cmake-build-*/
+*.o
+
+# Generated simulation/output files
+*.pcap
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Separate ns-3 Git repository
+ns-3.48/
