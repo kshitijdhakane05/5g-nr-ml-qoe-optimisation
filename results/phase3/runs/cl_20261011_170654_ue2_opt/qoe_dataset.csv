@@ -1,0 +1,3 @@
+scenario_id,ue_count,lambda_be,bandwidth_mhz,total_tx_power_dbm,scenario_size_m,flow_id,tx_packets,rx_packets,lost_packets,throughput_mbps,delay_ms,jitter_ms,packet_loss,qoe_proxy
+1,2,5000,50,35,30,1,11000,10998,0,10.2381,0.275974,0.0300173,0.000181818,0.680202
+1,2,5000,50,35,30,2,5500,5497,0,51.1721,0.862615,0.0816125,0.000545455,0.994828

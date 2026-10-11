@@ -173,6 +173,8 @@ class NetworkOptimiser:
                 "scenario_size_m": scenario_size_m,
                 "flow_type": flow_type,
                 "lambda_val": lambda_val,
+                "baseline_bandwidth_mhz": float(baseline_bandwidth_mhz),
+                "baseline_power_dbm": float(baseline_power_dbm),
             },
             "constraints": constraints or {},
             "baseline": baseline_config,

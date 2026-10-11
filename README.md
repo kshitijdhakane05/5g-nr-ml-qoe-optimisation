@@ -239,3 +239,54 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - **Relative Error**: $\frac{|\widehat{\text{QoE}} - \text{QoE}_{\text{meas}}|}{\text{QoE}_{\text{meas}}}$, evaluated only when $\text{QoE}_{\text{meas}} > 0$.
 - **Measured Improvement**: $\text{QoE}_{\text{meas, opt}} - \text{QoE}_{\text{meas, base}}$, reporting verified gain against the physical baseline run.
 
+---
+
+## Phase 4: Interactive Dashboard
+
+Phase 4 adds a polished, interactive **Streamlit dashboard** that integrates the Phase 1–3 components into a single research UI.
+
+### Installation
+
+All dependencies (including Streamlit and Plotly) are listed in `requirements.txt`:
+
+```bash
+# From the project root, activate the venv first:
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Starting the Dashboard
+
+```bash
+streamlit run app.py
+```
+
+The dashboard opens at `http://localhost:8501` by default.
+
+### Pages
+
+| Page | Description |
+|:---|:---|
+| **📊 Overview** | Dataset statistics, best model KPIs, Phase-3 run summary, QoE distribution chart |
+| **🔍 Simulation Explorer** | Filter and browse all 720 flow records; tabs for QoE histogram, UE-count box plot, throughput vs delay scatter |
+| **🤖 QoE Predictor** | Select a network configuration; ML model predicts QoE (gauge chart) with model performance summary |
+| **⚙️ Network Optimiser** | Enter a network context; optimiser searches the supported bandwidth space and ranks candidates by predicted QoE |
+| **🔁 Closed-Loop Verification** | View all Phase-3 verification records; launch new ns-3 simulations on button click and compare predicted vs measured QoE |
+
+### Known Limitations
+
+- **Research dashboard only** — not a live network controller.
+- `total_tx_power_dbm` is fixed at **35 dBm** (the only value in the training dataset). Power optimisation is not possible without additional simulation data.
+- **20 MHz bandwidth at 28 GHz FR2** produces 100 % outage in the ns-3 simulator. The model has learned this pattern; selecting 20 MHz will produce a near-zero QoE prediction.
+- `qoe_proxy` / predicted QoE is a **dimensionless score** in [0, 1]; it is **not** measured in milliseconds.
+- Predicted improvement is always labelled *"pending ns-3 verification"* until confirmed by a real simulation run on the Closed-Loop Verification page.
+- Simulations are **never launched automatically**; they require an explicit button click and a confirmation checkbox.
+
+### Test Coverage (Phase 4)
+
+New tests are in `tests/test_dashboard.py` (28 tests covering data loading, chart generation, ML integration, optimiser API, and Phase-3 display). The full test suite now runs **45 tests**:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+# Expected: Ran 45 tests in ~3s  OK
+```

@@ -1,0 +1,25 @@
+{
+  "run_id": "cl_20261011_170654_ue2_opt",
+  "timestamp": "2026-10-11T17:06:54.854748+00:00",
+  "config": {
+    "ue_count": 2,
+    "scenario_size_m": 30.0,
+    "bandwidth_mhz": 50.0,
+    "total_tx_power_dbm": 35.0,
+    "lambda_be": 5000.0,
+    "scenario_id": 1,
+    "sim_time": "1.5s"
+  },
+  "command": [
+    "/home/kshit/5g-project/ns-3.48/build/scratch/ns3.48-qoe-dataset-default",
+    "--ueNumPergNb=2",
+    "--bandwidthBand1=50000000",
+    "--totalTxPower=35.0",
+    "--scenarioSize=30.0",
+    "--lambdaBe=5000",
+    "--scenarioId=1",
+    "--simTime=1.5s",
+    "--outputDir=/home/kshit/5g-project/results/phase3/runs/cl_20261011_170654_ue2_opt",
+    "--simTag=sim_summary.txt"
+  ]
+}
