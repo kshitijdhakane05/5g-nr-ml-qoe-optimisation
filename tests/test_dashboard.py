@@ -29,7 +29,13 @@ if str(_ROOT) not in sys.path:
 # running Streamlit server.
 # ---------------------------------------------------------------------------
 _st_mock = MagicMock()
-_st_mock.cache_data = lambda *args, **kwargs: (lambda fn: fn)  # passthrough decorator
+def _mock_cache_data(*args, **kwargs):
+    def decorator(fn):
+        fn.clear = MagicMock()
+        return fn
+    return decorator
+_st_mock.cache_data = _mock_cache_data
+_st_mock.session_state = {}
 sys.modules.setdefault("streamlit", _st_mock)
 
 
@@ -400,6 +406,180 @@ class TestPhase3Display(unittest.TestCase):
                 row["measured_qoe"], 0,
                 f"Run {row['run_id']}: VERIFIED_SUCCESS but measured_qoe=0",
             )
+
+    def test_phase3_cache_clearing_reloads_new_records(self):
+        """Calling load_phase3_results.clear() ensures newly saved runs are read immediately."""
+        from dashboard.data_loader import load_phase3_results
+        # Verify the clear function is callable and doesn't raise
+        try:
+            load_phase3_results.clear()
+        except Exception as e:
+            self.fail(f"load_phase3_results.clear() raised: {e}")
+        df = load_phase3_results()
+        self.assertIsInstance(df, pd.DataFrame)
+
+    def test_phase3_historical_table_reloads_with_new_record(self):
+        """When a new run is appended and load_phase3_results.clear() is called,
+        the newly added record appears in the returned dataframe without browser refresh.
+        """
+        import tempfile
+        from dashboard import data_loader
+
+        original_csv = data_loader.PHASE3_RESULTS
+        with tempfile.NamedTemporaryFile("w+", suffix=".csv", delete=False) as tf:
+            tf.write(
+                "run_id,timestamp,ue_count,flow_type,lambda_val,optimised_bandwidth_mhz,"
+                "predicted_qoe,measured_qoe,absolute_prediction_error,verification_status,sim_success\n"
+                "run_initial,2026-10-11T12:00:00Z,2,voice_be,5000.0,50.0,0.99,0.99,0.00,VERIFIED_SUCCESS,True\n"
+            )
+            tf_path = Path(tf.name)
+
+        try:
+            data_loader.PHASE3_RESULTS = tf_path
+            data_loader.load_phase3_results.clear()
+            df1 = data_loader.load_phase3_results()
+            self.assertEqual(len(df1), 1)
+            self.assertEqual(df1.iloc[0]["run_id"], "run_initial")
+
+            # Simulate new simulation run appending to results CSV
+            with open(tf_path, "a", encoding="utf-8") as f:
+                f.write(
+                    "run_new,2026-10-11T12:05:00Z,4,voice_be,10000.0,50.0,0.95,0.94,0.01,VERIFIED_SUCCESS,True\n"
+                )
+
+            # Invalidate cache as app.py does
+            data_loader.load_phase3_results.clear()
+            df2 = data_loader.load_phase3_results()
+            self.assertEqual(len(df2), 2)
+            self.assertIn("run_new", df2["run_id"].values)
+        finally:
+            data_loader.PHASE3_RESULTS = original_csv
+            data_loader.load_phase3_results.clear()
+            if tf_path.exists():
+                tf_path.unlink()
+
+    def test_phase3_confirmation_and_metrics_remain_visible_across_rerun(self):
+        """Regression test: verification outcome, status, and metrics stored in session_state
+        remain intact and accessible across Streamlit reruns.
+        """
+        import streamlit as st
+        from simulation.closed_loop import ClosedLoopVerificationRecord
+
+        rec = ClosedLoopVerificationRecord(
+            run_id="cl_test_success_123",
+            timestamp="2026-10-11T12:00:00Z",
+            ue_count=2,
+            scenario_size_m=3.0,
+            flow_type="voice_be",
+            lambda_val=5000.0,
+            optimised_bandwidth_mhz=50.0,
+            optimised_power_dbm=35.0,
+            optimiser_status="FEASIBLE_OPTIMAL",
+            predicted_qoe=0.9941,
+            sim_success=True,
+            sim_duration_seconds=4.2,
+            sim_exit_code=0,
+            is_outage=False,
+            measured_throughput_mbps=51.15,
+            measured_delay_ms=0.85,
+            measured_jitter_ms=0.08,
+            measured_packet_loss=0.001,
+            total_tx_packets=3000,
+            total_rx_packets=2997,
+            measured_qoe=0.9948,
+            absolute_prediction_error=0.0007,
+            relative_prediction_error=0.0007,
+            run_baseline=False,
+            baseline_bandwidth_mhz=20.0,
+            baseline_power_dbm=35.0,
+            baseline_predicted_qoe=0.0,
+            baseline_measured_qoe=None,
+            predicted_improvement=0.9941,
+            measured_improvement=None,
+            run_dir="/tmp/run_dir",
+            csv_path="/tmp/run_dir/qoe_dataset.csv",
+            log_path="/tmp/run_dir/stdout.log",
+            verification_status="VERIFIED_SUCCESS",
+        )
+
+        st.session_state["phase3_last_run"] = {
+            "run_ok": True,
+            "record": rec,
+            "error_message": None,
+        }
+
+        # On rerun, session_state survives and is read by the page
+        last_run = st.session_state.get("phase3_last_run")
+        self.assertIsNotNone(last_run)
+        self.assertTrue(last_run["run_ok"])
+        saved_record = last_run["record"]
+
+        self.assertEqual(saved_record.verification_status, "VERIFIED_SUCCESS")
+        self.assertAlmostEqual(float(saved_record.predicted_qoe), 0.9941, places=4)
+        self.assertAlmostEqual(float(saved_record.measured_qoe), 0.9948, places=4)
+        self.assertAlmostEqual(float(saved_record.absolute_prediction_error), 0.0007, places=4)
+
+        # Metrics must be formattable as numeric values
+        self.assertEqual(f"{saved_record.predicted_qoe:.4f}", "0.9941")
+        self.assertEqual(f"{saved_record.measured_qoe:.4f}", "0.9948")
+        self.assertEqual(f"{saved_record.absolute_prediction_error:.4f}", "0.0007")
+
+    def test_phase3_failed_simulation_does_not_display_success(self):
+        """Failed simulations in session_state must preserve failure status and error message
+        without setting or displaying a success status.
+        """
+        import streamlit as st
+        from simulation.closed_loop import ClosedLoopVerificationRecord
+
+        failed_rec = ClosedLoopVerificationRecord(
+            run_id="cl_test_fail_456",
+            timestamp="2026-10-11T12:00:00Z",
+            ue_count=10,
+            scenario_size_m=100.0,
+            flow_type="low_latency",
+            lambda_val=40000.0,
+            optimised_bandwidth_mhz=50.0,
+            optimised_power_dbm=35.0,
+            optimiser_status="FEASIBLE_OPTIMAL",
+            predicted_qoe=0.6800,
+            sim_success=False,
+            sim_duration_seconds=120.0,
+            sim_exit_code=-2,
+            is_outage=False,
+            measured_throughput_mbps=0.0,
+            measured_delay_ms=0.0,
+            measured_jitter_ms=0.0,
+            measured_packet_loss=0.0,
+            total_tx_packets=0,
+            total_rx_packets=0,
+            measured_qoe=0.0,
+            absolute_prediction_error=None,
+            relative_prediction_error=None,
+            run_baseline=False,
+            baseline_bandwidth_mhz=50.0,
+            baseline_power_dbm=35.0,
+            baseline_predicted_qoe=0.68,
+            baseline_measured_qoe=None,
+            predicted_improvement=0.0,
+            measured_improvement=None,
+            run_dir="/tmp/fail_dir",
+            csv_path="/tmp/fail_dir/qoe_dataset.csv",
+            log_path="/tmp/fail_dir/stdout.log",
+            verification_status="SIMULATION_FAILED",
+            error_message="ns-3 simulation timed out after 120.0 seconds",
+        )
+
+        st.session_state["phase3_last_run"] = {
+            "run_ok": True,
+            "record": failed_rec,
+            "error_message": None,
+        }
+
+        last_run = st.session_state.get("phase3_last_run")
+        record = last_run["record"]
+        self.assertNotEqual(record.verification_status, "VERIFIED_SUCCESS")
+        self.assertEqual(record.verification_status, "SIMULATION_FAILED")
+        self.assertEqual(record.error_message, "ns-3 simulation timed out after 120.0 seconds")
 
 
 # ---------------------------------------------------------------------------

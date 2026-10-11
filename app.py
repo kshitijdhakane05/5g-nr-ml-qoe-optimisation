@@ -631,6 +631,7 @@ elif page == PAGES[4]:
 
     if run_btn:
         if not confirmed:
+            st.session_state.pop("phase3_last_run", None)
             st.error("Please tick the confirmation checkbox before running.")
         else:
             MODEL_PATH  = str(_ROOT / "models" / "qoe_model.joblib")
@@ -656,27 +657,53 @@ elif page == PAGES[4]:
                         sim_time_str=str(sim_time),
                     )
                     run_ok = True
+                    exc_msg = None
                 except Exception as exc:
-                    st.error(f"Verification failed with exception: {exc}")
                     record = None
                     run_ok = False
+                    exc_msg = str(exc)
 
-            if run_ok and record is not None:
-                vs = getattr(record, "verification_status", "UNKNOWN")
-                if vs == "VERIFIED_SUCCESS":
-                    st.success(f"✅ **{vs}** — simulation completed and QoE measured.")
-                elif vs == "SIMULATION_FAILED":
-                    st.error(f"❌ **{vs}** — ns-3 simulation did not succeed. Check the log file.")
+            # Persist outcome in session state so it survives st.rerun()
+            st.session_state["phase3_last_run"] = {
+                "run_ok": run_ok,
+                "record": record,
+                "error_message": exc_msg,
+            }
+
+            # Clear cache and trigger rerun so the table and details reload immediately
+            load_phase3_results.clear()
+            if hasattr(st, "rerun"):
+                st.rerun()
+
+    # --- Display outcome of latest run (persists across st.rerun) ---
+    if "phase3_last_run" in st.session_state:
+        last_run = st.session_state["phase3_last_run"]
+        run_ok = last_run.get("run_ok", False)
+        record = last_run.get("record")
+        exc_msg = last_run.get("error_message")
+
+        if not run_ok or record is None:
+            st.error(f"Verification failed with exception: {exc_msg}")
+        else:
+            vs = getattr(record, "verification_status", "UNKNOWN") if hasattr(record, "verification_status") else record.get("verification_status", "UNKNOWN")
+            if vs == "VERIFIED_SUCCESS":
+                st.success(f"✅ **{vs}** — simulation completed and QoE measured.")
+            elif vs == "SIMULATION_FAILED":
+                err_detail = getattr(record, "error_message", None) if hasattr(record, "error_message") else record.get("error_message")
+                if err_detail:
+                    st.error(f"❌ **{vs}** — ns-3 simulation did not succeed: {err_detail}")
                 else:
-                    st.warning(f"⚠️ {vs}")
+                    st.error(f"❌ **{vs}** — ns-3 simulation did not succeed. Check the log file.")
+            else:
+                st.warning(f"⚠️ {vs}")
 
-                if vs != "SIMULATION_FAILED":
-                    r_cols = st.columns(3)
-                    r_cols[0].metric("Predicted QoE",  f"{getattr(record, 'predicted_qoe',  0):.4f}")
-                    r_cols[1].metric("Measured QoE",   f"{getattr(record, 'measured_qoe',   0):.4f}")
-                    r_cols[2].metric("Abs Error",       f"{getattr(record, 'absolute_prediction_error', 0):.4f}")
+            if vs != "SIMULATION_FAILED":
+                r_cols = st.columns(3)
+                pred_val = getattr(record, "predicted_qoe", 0) if hasattr(record, "predicted_qoe") else record.get("predicted_qoe", 0)
+                meas_val = getattr(record, "measured_qoe", 0) if hasattr(record, "measured_qoe") else record.get("measured_qoe", 0)
+                abs_val = getattr(record, "absolute_prediction_error", None) if hasattr(record, "absolute_prediction_error") else record.get("absolute_prediction_error")
 
-                # Clear cache so the table reloads immediately
-                load_phase3_results.clear()
-                st.info("Results table updated. Refresh the page or navigate away and back to see the new row.")
+                r_cols[0].metric("Predicted QoE", f"{pred_val:.4f}")
+                r_cols[1].metric("Measured QoE", f"{meas_val:.4f}")
+                r_cols[2].metric("Abs Error", f"{abs_val:.4f}" if abs_val is not None else "—")
 
