@@ -188,4 +188,54 @@ All optimization decisions, candidates, and constraint statuses are automaticall
 All reported improvements are strictly labeled:
 > **"Predicted improvement — pending ns-3 verification"**
 
-The offline optimiser uses the ML surrogate to select promising configurations. **Phase 3** will introduce the closed-loop ns-3 runner to simulate the selected configurations in the 3GPP NR environment and verify actual network KPIs.
+The offline optimiser uses the ML surrogate to select promising configurations. **Phase 3** introduces the closed-loop ns-3 runner to simulate selected configurations in the 3GPP NR environment and verify actual network KPIs against ML predictions.
+
+---
+
+## Phase 3: Closed-Loop ns-3 Simulation Verification
+
+Phase 3 implements an **offline, simulation-based closed-loop verification workflow** (NOT live network control). It automates the transition from ML recommendation to physical 5G simulation, actual metric parsing, and error quantification.
+
+### 1. Workflow Architecture
+```
+Network Context (UEs, Area, Traffic Demand)
+           ↓
+Phase 2 Optimiser (selects candidate & predicts QoE)
+           ↓
+ns-3 Runner (launches isolated 5G simulation via subprocess)
+           ↓
+Result Parser (extracts throughput, delay, jitter, packet loss)
+           ↓
+QoE Calculation (calculates measured QoE using exact formula)
+           ↓
+Verification & Error Analysis (|QoE_pred - QoE_meas|, gain vs baseline)
+           ↓
+Persistent Logging (results/phase3/verification_results.csv)
+```
+
+### 2. Execution Isolation & Artifact Preservation
+- Each simulation run executes with `cwd = results/phase3/runs/<run_id>/` and an absolute `--outputDir`.
+- Generates per-run simulation logs (`stdout.log`, `stderr.log`, `run_config.json`, `sim_summary.txt`, and per-run `qoe_dataset.csv`).
+- The original dataset (`data/raw/qoe_dataset.csv`), the `ns-3.48/` repository, and Phase 1/2 outputs are **never modified or overwritten**.
+
+### 3. Running Closed-Loop Experiments
+
+#### Run Closed-Loop Verification
+```bash
+python -m simulation.closed_loop \
+  --ue-count 2 \
+  --flow-type voice_be \
+  --lambda-val 5000 \
+  --baseline-bandwidth 20
+```
+
+#### Run All Unit Tests Across Phases
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+### 4. Interpreting Prediction Error
+- **Absolute Error**: $|\widehat{\text{QoE}} - \text{QoE}_{\text{meas}}|$, measuring deviation on the dimensionless $[0, 1]$ QoE scale.
+- **Relative Error**: $\frac{|\widehat{\text{QoE}} - \text{QoE}_{\text{meas}}|}{\text{QoE}_{\text{meas}}}$, evaluated only when $\text{QoE}_{\text{meas}} > 0$.
+- **Measured Improvement**: $\text{QoE}_{\text{meas, opt}} - \text{QoE}_{\text{meas, base}}$, reporting verified gain against the physical baseline run.
+
