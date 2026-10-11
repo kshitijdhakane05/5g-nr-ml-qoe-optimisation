@@ -658,6 +658,52 @@ class TestRegressionOptimizerBaselineKeyError(unittest.TestCase):
                     )
 
 
+# ---------------------------------------------------------------------------
+# 8. Evaluation Outage Breakdown tests
+# ---------------------------------------------------------------------------
+class TestEvaluationOutageBreakdown(unittest.TestCase):
+    """Verify compute_outage_breakdown_metrics separates outage and non-outage subsets correctly."""
+
+    def test_breakdown_on_synthetic_data(self):
+        from ml.evaluate import compute_outage_breakdown_metrics
+        y_true = np.array([0.0, 0.0, 0.6, 0.8])
+        y_pred = np.array([0.0, 0.1, 0.65, 0.75])
+
+        breakdown = compute_outage_breakdown_metrics(y_true, y_pred)
+        self.assertIn("all", breakdown)
+        self.assertIn("outage", breakdown)
+        self.assertIn("non_outage", breakdown)
+
+        self.assertEqual(breakdown["all"]["count"], 4)
+        self.assertEqual(breakdown["outage"]["count"], 2)
+        self.assertEqual(breakdown["non_outage"]["count"], 2)
+
+        self.assertAlmostEqual(breakdown["outage"]["MAE"], 0.05, places=4)
+        self.assertAlmostEqual(breakdown["non_outage"]["MAE"], 0.05, places=4)
+
+    def test_breakdown_on_saved_predictions(self):
+        from ml.evaluate import compute_outage_breakdown_metrics
+        preds_path = _ROOT / "results" / "ml" / "predictions.csv"
+        if not preds_path.exists():
+            self.skipTest("results/ml/predictions.csv not found")
+
+        df = pd.read_csv(preds_path)
+        breakdown = compute_outage_breakdown_metrics(
+            df["actual_qoe_proxy"],
+            df["pred_qoe_RandomForestRegressor"],
+        )
+
+        self.assertEqual(breakdown["all"]["count"], 130)
+        self.assertEqual(breakdown["outage"]["count"], 68)
+        self.assertEqual(breakdown["non_outage"]["count"], 62)
+
+        # Outage rows are predicted with 0 error by best model
+        self.assertAlmostEqual(breakdown["outage"]["MAE"], 0.0, places=4)
+        # Non-outage rows have positive non-zero error
+        self.assertGreater(breakdown["non_outage"]["MAE"], 0.0)
+        self.assertLess(breakdown["non_outage"]["MAE"], 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()
 

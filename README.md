@@ -103,6 +103,32 @@ Evaluation logs are stored at `results/ml/model_results.csv` and detailed predic
 
 ---
 
+### 6. Dataset Limitations & Outage Breakdown
+
+An audit of the training and evaluation dataset reveals key operational characteristics and boundary limitations to maintain scientific rigor:
+
+- **Dataset Size and Scenarios**: The dataset contains **720 flow records across 120 unique scenarios** (6 flows per scenario on average, matching UE count distributions from 2 to 10).
+- **Outage Distribution (QoE = 0)**: **360 rows (50% of the dataset) have $\text{qoe\_proxy} = 0.0$** and are labelled as outages (`is_outage = 1`, `delivery_status = 'outage'`). In ns-3 FR2 (28 GHz) mmWave simulations, all 60 scenarios configured with 20 MHz bandwidth suffer total packet drop due to severe propagation loss and insufficient resource allocation, while all 60 scenarios with 50 MHz achieve delivery.
+- **Limited Bandwidth Support**: The current dataset tests **only two bandwidth values: 20 MHz and 50 MHz**.
+- **Fixed Transmit Power**: Total gNB transmit power is **fixed at 35 dBm** across all 120 scenarios in the current dataset.
+- **Proof-of-Concept Optimiser**: Because the training data contains only two bandwidth points (20 MHz outage vs. 50 MHz delivered) and a single transmit power level, the current Phase 2 optimiser operates as a **proof of concept over a limited configuration space**. It reliably learns the outage boundary rather than fine-grained continuous trade-offs.
+- **`lost_packets` Anomaly**: The `lost_packets` column is recorded as `0` throughout the dataset due to an ns-3 exporter quirk and **must not be trusted**. Model training and evaluation rely strictly on the validated `packet_loss` calculation derived from transmitted and received packets ($\text{packet\_loss} = 1.0 - \text{rx\_packets} / \text{tx\_packets}$).
+- **Underrepresented Intermediate QoE**: Non-outage QoE values cluster predominantly in the $[0.5, 0.7]$ range (266 rows), while intermediate degraded QoE values ($0 < \text{qoe\_proxy} \le 0.5$) account for only 49 rows (6.8% of the dataset). Model performance in degraded-but-not-outage conditions is therefore subject to higher uncertainty.
+- **Test-Set Metric Breakdown (Outage vs. Non-Outage)**:
+  On the holdout test set (24 scenarios, 130 flows):
+  - **Outage flows** ($N=68$, actual $\text{QoE}=0.0$):
+    - RandomForest: $\text{MAE} = 0.0000$, $\text{RMSE} = 0.0000$ (exact classification of outage state)
+    - HistGradientBoosting: $\text{MAE} = 0.0032$, $\text{RMSE} = 0.0051$
+    - LinearRegression: $\text{MAE} = 0.0378$, $\text{RMSE} = 0.0447$
+  - **Non-outage flows** ($N=62$, actual $\text{QoE} > 0.0$):
+    - RandomForest: $\text{MAE} = 0.0339$, $\text{RMSE} = 0.0645$, $R^2 = 0.7821$
+    - HistGradientBoosting: $\text{MAE} = 0.0351$, $\text{RMSE} = 0.0667$, $R^2 = 0.7670$
+    - LinearRegression: $\text{MAE} = 0.0742$, $\text{RMSE} = 0.1190$, $R^2 = 0.2577$
+
+  *Note*: The headline test $R^2 = 0.9812$ is partially aided by the separable 50% outage block; for non-outage operational flows, the best model achieves $R^2 \approx 0.78$ with an average prediction error under 0.034 on the $[0, 1]$ scale.
+
+---
+
 ## Phase 2: Offline ML-based Network Configuration Optimisation
 
 Phase 2 builds an **offline ML-based network configuration optimiser** using the verified Phase 1 surrogate model.

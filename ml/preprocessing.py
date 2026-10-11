@@ -74,7 +74,9 @@ def preprocess_dataset(df: pd.DataFrame) -> pd.DataFrame:
     4. flow_lambda: Actual packet arrival rate for this specific flow.
     5. packet_size_bytes: Actual UDP packet size for this specific flow.
     6. offered_throughput_mbps: Offered traffic rate calculated from tx_packets and packet size
-       over the 0.6 second active window.
+       over the 0.6 second active window. Note: This feature is derived strictly from pre-simulation
+       traffic configuration (traffic-generation parameters) and is redundant with traffic-profile
+       features (flow_lambda * packet_size_bytes); it is NOT a post-simulation measurement or outcome.
     """
     df_proc = df.copy()
 
@@ -94,7 +96,10 @@ def preprocess_dataset(df: pd.DataFrame) -> pd.DataFrame:
     df_proc["flow_lambda"] = np.where(is_low_lat, 10000.0, df_proc["lambda_be"].astype(float))
 
     # Offered load calculation: txPackets * packetSize * 8 / (0.6s * 1e6)
-    # Active traffic duration is 0.6s (simTime=1.0s, appStartTime=0.4s)
+    # Active traffic duration is 0.6s (simTime=1.0s, appStartTime=0.4s).
+    # Note: offered_throughput_mbps is derived from pre-simulation traffic configuration
+    # (deterministic function of flow_lambda and packet_size) and is redundant with those
+    # traffic-profile features. It does not leak post-simulation network measurements.
     df_proc["offered_throughput_mbps"] = (
         df_proc["tx_packets"] * df_proc["packet_size_bytes"] * 8.0 / (0.6 * 1_000_000.0)
     )
