@@ -22,6 +22,7 @@ IMPORTANT
 from __future__ import annotations
 
 import sys
+import pandas as pd
 from pathlib import Path
 
 # Make sure the project root is on sys.path so that ml/, optimisation/,
@@ -623,6 +624,22 @@ elif page == PAGES[4]:
             help="Longer times give more stable averages but take more wall-clock time.",
         )
 
+        st.markdown("##### 🔄 QoE Recovery Mode (Optional)")
+        enable_recovery = st.checkbox(
+            "Enable QoE Recovery Mode",
+            value=False,
+            help="If measured QoE is below target, performs at most one corrective ns-3 simulation with upgraded bandwidth.",
+        )
+        target_qoe = st.number_input(
+            "Target QoE Threshold",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.80,
+            step=0.05,
+            disabled=not enable_recovery,
+            help="Trigger corrective action if initial measured QoE is below this threshold (default: 0.80).",
+        )
+
         confirmed = st.checkbox(
             "✅ I confirm: this will launch a real ns-3 simulation process (~5 s).",
             value=False,
@@ -637,6 +654,7 @@ elif page == PAGES[4]:
             MODEL_PATH  = str(_ROOT / "models" / "qoe_model.joblib")
             OUTPUT_DIR  = str(_ROOT / "results" / "phase3" / "runs")
             RESULTS_CSV = str(PHASE3_RESULTS)
+            RECOVERY_CSV = str(_ROOT / "results" / "phase3" / "recovery_results.csv")
 
             with st.spinner(f"Running ns-3 simulation… (estimated {sim_time})"):
                 try:
@@ -645,21 +663,37 @@ elif page == PAGES[4]:
                         output_base_dir=OUTPUT_DIR,
                         results_csv_path=RESULTS_CSV,
                     )
-                    record = verifier.run_closed_loop_verification(
-                        ue_count=int(ue_count),
-                        scenario_size_m=float(scenario_size_m),
-                        flow_type=str(flow_type),
-                        lambda_val=float(lambda_val),
-                        baseline_bandwidth_mhz=float(baseline_bw),
-                        baseline_power_dbm=35.0,
-                        constraints=None,
-                        run_baseline_sim=bool(run_baseline_sim),
-                        sim_time_str=str(sim_time),
-                    )
+                    if enable_recovery:
+                        recovery_record = verifier.run_verification_with_recovery(
+                            ue_count=int(ue_count),
+                            initial_bandwidth_mhz=float(baseline_bw),
+                            total_tx_power_dbm=35.0,
+                            scenario_size_m=float(scenario_size_m),
+                            flow_type=str(flow_type),
+                            lambda_val=float(lambda_val),
+                            target_qoe=float(target_qoe),
+                            sim_time_str=str(sim_time),
+                            recovery_results_csv_path=RECOVERY_CSV,
+                        )
+                        record = recovery_record.corrective_record or recovery_record.initial_record
+                    else:
+                        recovery_record = None
+                        record = verifier.run_closed_loop_verification(
+                            ue_count=int(ue_count),
+                            scenario_size_m=float(scenario_size_m),
+                            flow_type=str(flow_type),
+                            lambda_val=float(lambda_val),
+                            baseline_bandwidth_mhz=float(baseline_bw),
+                            baseline_power_dbm=35.0,
+                            constraints=None,
+                            run_baseline_sim=bool(run_baseline_sim),
+                            sim_time_str=str(sim_time),
+                        )
                     run_ok = True
                     exc_msg = None
                 except Exception as exc:
                     record = None
+                    recovery_record = None
                     run_ok = False
                     exc_msg = str(exc)
 
@@ -667,6 +701,7 @@ elif page == PAGES[4]:
             st.session_state["phase3_last_run"] = {
                 "run_ok": run_ok,
                 "record": record,
+                "recovery_record": recovery_record,
                 "error_message": exc_msg,
             }
 
@@ -680,30 +715,109 @@ elif page == PAGES[4]:
         last_run = st.session_state["phase3_last_run"]
         run_ok = last_run.get("run_ok", False)
         record = last_run.get("record")
+        recovery_record = last_run.get("recovery_record")
         exc_msg = last_run.get("error_message")
 
-        if not run_ok or record is None:
+        if not run_ok or (record is None and recovery_record is None):
             st.error(f"Verification failed with exception: {exc_msg}")
         else:
-            vs = getattr(record, "verification_status", "UNKNOWN") if hasattr(record, "verification_status") else record.get("verification_status", "UNKNOWN")
-            if vs == "VERIFIED_SUCCESS":
-                st.success(f"✅ **{vs}** — simulation completed and QoE measured.")
-            elif vs == "SIMULATION_FAILED":
-                err_detail = getattr(record, "error_message", None) if hasattr(record, "error_message") else record.get("error_message")
-                if err_detail:
-                    st.error(f"❌ **{vs}** — ns-3 simulation did not succeed: {err_detail}")
-                else:
-                    st.error(f"❌ **{vs}** — ns-3 simulation did not succeed. Check the log file.")
+            if recovery_record is not None:
+                # Render QoE Recovery details
+                st.markdown("#### 🔄 QoE Recovery Mode Report")
+                rec_status = getattr(recovery_record, "status", "UNKNOWN")
+                target_val = getattr(recovery_record, "target_qoe", 0.80)
+                init_bw = getattr(recovery_record, "previous_bandwidth_mhz", 20.0)
+                corr_bw = getattr(recovery_record, "corrected_bandwidth_mhz", None)
+                init_metrics = getattr(recovery_record, "initial_metrics", {})
+                corr_metrics = getattr(recovery_record, "corrected_metrics", None)
+                rationale = getattr(recovery_record, "rationale", "")
+
+                if rec_status == "SUCCESS":
+                    st.success(f"✅ **RECOVERY SUCCESS**: Corrective simulation met target QoE ({target_val:.2f})!")
+                elif rec_status == "NOT_NEEDED":
+                    st.info(f"ℹ️ **RECOVERY NOT NEEDED**: Initial measured QoE ({init_metrics.get('measured_qoe', 0.0):.4f}) already meets target ({target_val:.2f}).")
+                elif rec_status == "NO_ALTERNATIVE_CONFIGURATION":
+                    st.warning(f"⚠️ **NO ALTERNATIVE CONFIGURATION**: Network is already at maximum supported bandwidth ({init_bw:.1f} MHz).")
+                elif rec_status == "TARGET_NOT_MET":
+                    st.warning(f"⚠️ **TARGET NOT MET**: Corrective run completed but measured QoE ({corr_metrics.get('measured_qoe', 0.0) if corr_metrics else 0.0:.4f}) is below target ({target_val:.2f}).")
+                elif rec_status == "SIMULATION_FAILED":
+                    st.error(f"❌ **SIMULATION FAILED**: {recovery_record.error_message or 'Simulation crashed during execution.'}")
+
+                st.caption(f"**Rationale:** {rationale}")
+
+                # Change log and parameters
+                with st.expander("📋 Recovery Change Log & Parameters", expanded=True):
+                    fixed_params = getattr(recovery_record, "fixed_parameters", {})
+                    cl_col1, cl_col2 = st.columns(2)
+                    with cl_col1:
+                        st.write(f"**Previous Bandwidth:** {init_bw:.1f} MHz")
+                        st.write(f"**Corrected Bandwidth:** {f'{corr_bw:.1f} MHz' if corr_bw is not None else 'None'}")
+                        st.write(f"**Target QoE:** {target_val:.2f}")
+                        st.write(f"**Target Achieved:** {'Yes' if getattr(recovery_record, 'target_achieved', False) else 'No'}")
+                    with cl_col2:
+                        st.write("**Fixed Parameters:**")
+                        st.write(f"- Tx Power: {fixed_params.get('total_tx_power_dbm', 35.0)} dBm")
+                        st.write(f"- UE Count: {fixed_params.get('ue_count', '—')}")
+                        st.write(f"- Flow Type: {fixed_params.get('flow_type', '—')}")
+                        st.write(f"- Arrival Rate: {fixed_params.get('lambda_val', '—')} pkt/s")
+                        st.write(f"- Scenario Size: {fixed_params.get('scenario_size_m', '—')} m")
+
+                # Metrics comparison table
+                cmp_data = [
+                    {
+                        "KPI": "Measured QoE",
+                        "Initial (Simulated)": f"{init_metrics.get('measured_qoe', 0.0):.4f}",
+                        "Corrected (Simulated)": f"{corr_metrics.get('measured_qoe', 0.0):.4f}" if corr_metrics else "—",
+                        "Target": f"{target_val:.4f}",
+                    },
+                    {
+                        "KPI": "Throughput (Mbps)",
+                        "Initial (Simulated)": f"{init_metrics.get('measured_throughput_mbps', 0.0):.2f}",
+                        "Corrected (Simulated)": f"{corr_metrics.get('measured_throughput_mbps', 0.0):.2f}" if corr_metrics else "—",
+                        "Target": "—",
+                    },
+                    {
+                        "KPI": "Mean Delay (ms)",
+                        "Initial (Simulated)": f"{init_metrics.get('measured_delay_ms', 0.0):.2f}",
+                        "Corrected (Simulated)": f"{corr_metrics.get('measured_delay_ms', 0.0):.2f}" if corr_metrics else "—",
+                        "Target": "—",
+                    },
+                    {
+                        "KPI": "Mean Jitter (ms)",
+                        "Initial (Simulated)": f"{init_metrics.get('measured_jitter_ms', 0.0):.2f}",
+                        "Corrected (Simulated)": f"{corr_metrics.get('measured_jitter_ms', 0.0):.2f}" if corr_metrics else "—",
+                        "Target": "—",
+                    },
+                    {
+                        "KPI": "Packet Loss",
+                        "Initial (Simulated)": f"{init_metrics.get('measured_packet_loss', 0.0):.4f}",
+                        "Corrected (Simulated)": f"{corr_metrics.get('measured_packet_loss', 0.0):.4f}" if corr_metrics else "—",
+                        "Target": "—",
+                    },
+                ]
+                st.table(pd.DataFrame(cmp_data))
+
             else:
-                st.warning(f"⚠️ {vs}")
+                vs = getattr(record, "verification_status", "UNKNOWN") if hasattr(record, "verification_status") else record.get("verification_status", "UNKNOWN")
+                if vs == "VERIFIED_SUCCESS":
+                    st.success(f"✅ **{vs}** — simulation completed and QoE measured.")
+                elif vs == "SIMULATION_FAILED":
+                    err_detail = getattr(record, "error_message", None) if hasattr(record, "error_message") else record.get("error_message")
+                    if err_detail:
+                        st.error(f"❌ **{vs}** — ns-3 simulation did not succeed: {err_detail}")
+                    else:
+                        st.error(f"❌ **{vs}** — ns-3 simulation did not succeed. Check the log file.")
+                else:
+                    st.warning(f"⚠️ {vs}")
 
-            if vs != "SIMULATION_FAILED":
-                r_cols = st.columns(3)
-                pred_val = getattr(record, "predicted_qoe", 0) if hasattr(record, "predicted_qoe") else record.get("predicted_qoe", 0)
-                meas_val = getattr(record, "measured_qoe", 0) if hasattr(record, "measured_qoe") else record.get("measured_qoe", 0)
-                abs_val = getattr(record, "absolute_prediction_error", None) if hasattr(record, "absolute_prediction_error") else record.get("absolute_prediction_error")
+                if vs != "SIMULATION_FAILED":
+                    r_cols = st.columns(3)
+                    pred_val = getattr(record, "predicted_qoe", 0) if hasattr(record, "predicted_qoe") else record.get("predicted_qoe", 0)
+                    meas_val = getattr(record, "measured_qoe", 0) if hasattr(record, "measured_qoe") else record.get("measured_qoe", 0)
+                    abs_val = getattr(record, "absolute_prediction_error", None) if hasattr(record, "absolute_prediction_error") else record.get("absolute_prediction_error")
 
-                r_cols[0].metric("Predicted QoE", f"{pred_val:.4f}")
-                r_cols[1].metric("Measured QoE", f"{meas_val:.4f}")
-                r_cols[2].metric("Abs Error", f"{abs_val:.4f}" if abs_val is not None else "—")
+                    r_cols[0].metric("Predicted QoE", f"{pred_val:.4f}")
+                    r_cols[1].metric("Measured QoE", f"{meas_val:.4f}")
+                    r_cols[2].metric("Abs Error", f"{abs_val:.4f}" if abs_val is not None else "—")
+
 

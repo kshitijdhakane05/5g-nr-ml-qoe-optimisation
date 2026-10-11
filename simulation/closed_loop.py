@@ -75,6 +75,26 @@ class ClosedLoopVerificationRecord:
     error_message: str | None = None
 
 
+@dataclass
+class QoERecoveryRecord:
+    run_id: str
+    timestamp: str
+    target_qoe: float
+    recovery_attempted: bool
+    status: str  # "NOT_NEEDED", "SUCCESS", "TARGET_NOT_MET", "NO_ALTERNATIVE_CONFIGURATION", "SIMULATION_FAILED"
+    rationale: str
+    previous_bandwidth_mhz: float
+    corrected_bandwidth_mhz: float | None
+    fixed_parameters: dict[str, Any]
+    initial_metrics: dict[str, Any]
+    corrected_metrics: dict[str, Any] | None
+    target_achieved: bool
+    initial_record: ClosedLoopVerificationRecord
+    corrective_record: ClosedLoopVerificationRecord | None = None
+    error_message: str | None = None
+
+
+
 class ClosedLoopVerifier:
     """Orchestrates closed-loop ML optimisation and physical ns-3 simulation."""
 
@@ -242,6 +262,319 @@ class ClosedLoopVerifier:
         self.persist_record(record)
         return record
 
+    def run_single_simulation(
+        self,
+        ue_count: int,
+        bandwidth_mhz: float,
+        total_tx_power_dbm: float = 35.0,
+        scenario_size_m: float = 30.0,
+        flow_type: str = "voice_be",
+        lambda_val: float = 10000.0,
+        sim_time_str: str = "1s",
+        run_tag: str = "single",
+    ) -> ClosedLoopVerificationRecord:
+        """Run an ns-3 simulation for an explicit configuration without baseline comparison."""
+        timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        run_id = f"sim_{timestamp_str}_bw{int(bandwidth_mhz)}_{run_tag}"
+
+        # Surrogate prediction for the explicit configuration
+        pred_qoe = self.optimiser.evaluate_configuration({
+            "ue_count": ue_count,
+            "bandwidth_mhz": bandwidth_mhz,
+            "total_tx_power_dbm": total_tx_power_dbm,
+            "scenario_size_m": scenario_size_m,
+            "flow_type": flow_type,
+            "lambda_val": lambda_val,
+        })
+
+        sim_config = {
+            "ue_count": ue_count,
+            "scenario_size_m": scenario_size_m,
+            "bandwidth_mhz": bandwidth_mhz,
+            "total_tx_power_dbm": total_tx_power_dbm,
+            "lambda_be": lambda_val,
+            "scenario_id": 1,
+            "sim_time": sim_time_str,
+        }
+
+        run_result = self.runner.run_simulation(config=sim_config, run_id=run_id)
+
+        if run_result.success and run_result.csv_path.exists():
+            metrics = parse_simulation_csv(
+                run_result.csv_path,
+                target_flow_type=flow_type,
+            )
+        else:
+            metrics = SimulationMetrics(
+                success=False,
+                is_outage=False,
+                num_flows=0,
+                target_flow_type=flow_type,
+                target_flow_count=0,
+                mean_throughput_mbps=0.0,
+                mean_delay_ms=0.0,
+                mean_jitter_ms=0.0,
+                mean_packet_loss=0.0,
+                mean_qoe_proxy=0.0,
+                total_tx_packets=0,
+                total_rx_packets=0,
+                error_message=run_result.error_message or "Simulation failed",
+            )
+
+        if metrics.success:
+            meas_qoe = metrics.mean_qoe_proxy
+            abs_err = abs(pred_qoe - meas_qoe)
+            rel_err = (abs_err / meas_qoe) if meas_qoe > 1e-6 else None
+            verif_status = "VERIFIED_SUCCESS" if abs_err <= 0.15 else "VERIFIED_HIGH_ERROR"
+        else:
+            meas_qoe = 0.0
+            abs_err = None
+            rel_err = None
+            verif_status = "SIMULATION_FAILED"
+
+        record = ClosedLoopVerificationRecord(
+            run_id=run_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            ue_count=ue_count,
+            scenario_size_m=scenario_size_m,
+            flow_type=flow_type,
+            lambda_val=lambda_val,
+            optimised_bandwidth_mhz=bandwidth_mhz,
+            optimised_power_dbm=total_tx_power_dbm,
+            optimiser_status="DIRECT_CONFIGURATION",
+            predicted_qoe=pred_qoe,
+            sim_success=run_result.success,
+            sim_duration_seconds=run_result.duration_seconds,
+            sim_exit_code=run_result.exit_code,
+            is_outage=metrics.is_outage,
+            measured_throughput_mbps=metrics.mean_throughput_mbps,
+            measured_delay_ms=metrics.mean_delay_ms,
+            measured_jitter_ms=metrics.mean_jitter_ms,
+            measured_packet_loss=metrics.mean_packet_loss,
+            total_tx_packets=metrics.total_tx_packets,
+            total_rx_packets=metrics.total_rx_packets,
+            measured_qoe=meas_qoe,
+            absolute_prediction_error=abs_err,
+            relative_prediction_error=rel_err,
+            run_baseline=False,
+            baseline_bandwidth_mhz=None,
+            baseline_power_dbm=None,
+            baseline_predicted_qoe=None,
+            baseline_measured_qoe=None,
+            predicted_improvement=None,
+            measured_improvement=None,
+            run_dir=str(run_result.run_dir),
+            csv_path=str(run_result.csv_path),
+            log_path=str(run_result.run_dir / "stdout.log"),
+            verification_status=verif_status,
+            error_message=metrics.error_message,
+        )
+        self.persist_record(record)
+        return record
+
+    def run_verification_with_recovery(
+        self,
+        ue_count: int,
+        initial_bandwidth_mhz: float = 20.0,
+        total_tx_power_dbm: float = 35.0,
+        scenario_size_m: float = 30.0,
+        flow_type: str = "voice_be",
+        lambda_val: float = 10000.0,
+        target_qoe: float = 0.80,
+        sim_time_str: str = "1s",
+        recovery_results_csv_path: str | Path = "results/phase3/recovery_results.csv",
+    ) -> QoERecoveryRecord:
+        """Run an initial real ns-3 simulation and perform at most one corrective simulation if needed.
+        
+        Rules:
+        - If initial measured QoE >= target_qoe: NOT_NEEDED.
+        - If initial measured QoE < target_qoe:
+            - If initial_bandwidth_mhz == 20.0: Corrective bandwidth is 50.0 MHz.
+            - If initial_bandwidth_mhz == 50.0: NO_ALTERNATIVE_CONFIGURATION (no higher supported BW).
+        - Limit: Exactly at most 1 corrective simulation attempt.
+        - Physical ns-3 simulation executed for corrective attempt (no ML substitution).
+        """
+        timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        recovery_run_id = f"recovery_{timestamp_str}_ue{ue_count}"
+
+        fixed_params = {
+            "ue_count": ue_count,
+            "total_tx_power_dbm": total_tx_power_dbm,
+            "scenario_size_m": scenario_size_m,
+            "flow_type": flow_type,
+            "lambda_val": lambda_val,
+            "sim_time": sim_time_str,
+        }
+
+        # Step 1: Run initial simulation
+        initial_record = self.run_single_simulation(
+            ue_count=ue_count,
+            bandwidth_mhz=initial_bandwidth_mhz,
+            total_tx_power_dbm=total_tx_power_dbm,
+            scenario_size_m=scenario_size_m,
+            flow_type=flow_type,
+            lambda_val=lambda_val,
+            sim_time_str=sim_time_str,
+            run_tag="initial",
+        )
+
+        initial_metrics = {
+            "measured_qoe": initial_record.measured_qoe,
+            "measured_throughput_mbps": initial_record.measured_throughput_mbps,
+            "measured_delay_ms": initial_record.measured_delay_ms,
+            "measured_jitter_ms": initial_record.measured_jitter_ms,
+            "measured_packet_loss": initial_record.measured_packet_loss,
+            "is_outage": initial_record.is_outage,
+            "sim_success": initial_record.sim_success,
+        }
+
+        # Case 1: Initial simulation crashed or failed execution
+        if not initial_record.sim_success:
+            rec = QoERecoveryRecord(
+                run_id=recovery_run_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                target_qoe=target_qoe,
+                recovery_attempted=False,
+                status="SIMULATION_FAILED",
+                rationale="Initial ns-3 simulation failed to execute successfully.",
+                previous_bandwidth_mhz=initial_bandwidth_mhz,
+                corrected_bandwidth_mhz=None,
+                fixed_parameters=fixed_params,
+                initial_metrics=initial_metrics,
+                corrected_metrics=None,
+                target_achieved=False,
+                initial_record=initial_record,
+                corrective_record=None,
+                error_message=initial_record.error_message or "Initial simulation failed",
+            )
+            self.persist_recovery_record(rec, recovery_results_csv_path)
+            return rec
+
+        # Case 2: Initial measured QoE already meets or exceeds target
+        if initial_record.measured_qoe >= target_qoe:
+            rec = QoERecoveryRecord(
+                run_id=recovery_run_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                target_qoe=target_qoe,
+                recovery_attempted=False,
+                status="NOT_NEEDED",
+                rationale=(
+                    f"Initial measured QoE ({initial_record.measured_qoe:.4f}) already meets "
+                    f"or exceeds target QoE ({target_qoe:.4f})."
+                ),
+                previous_bandwidth_mhz=initial_bandwidth_mhz,
+                corrected_bandwidth_mhz=None,
+                fixed_parameters=fixed_params,
+                initial_metrics=initial_metrics,
+                corrected_metrics=None,
+                target_achieved=True,
+                initial_record=initial_record,
+                corrective_record=None,
+                error_message=None,
+            )
+            self.persist_recovery_record(rec, recovery_results_csv_path)
+            return rec
+
+        # Initial measured QoE is below target: determine corrective action
+        if initial_bandwidth_mhz >= 50.0:
+            rec = QoERecoveryRecord(
+                run_id=recovery_run_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                target_qoe=target_qoe,
+                recovery_attempted=False,
+                status="NO_ALTERNATIVE_CONFIGURATION",
+                rationale=(
+                    f"Initial measured QoE ({initial_record.measured_qoe:.4f}) is below target "
+                    f"({target_qoe:.4f}), but network is already at maximum supported bandwidth "
+                    f"(50.0 MHz). No higher supported bandwidth alternative exists in {{20.0, 50.0}} MHz."
+                ),
+                previous_bandwidth_mhz=initial_bandwidth_mhz,
+                corrected_bandwidth_mhz=None,
+                fixed_parameters=fixed_params,
+                initial_metrics=initial_metrics,
+                corrected_metrics=None,
+                target_achieved=False,
+                initial_record=initial_record,
+                corrective_record=None,
+                error_message=None,
+            )
+            self.persist_recovery_record(rec, recovery_results_csv_path)
+            return rec
+
+        # Case 3: Initial bandwidth is 20 MHz -> Corrective bandwidth is 50 MHz
+        corrected_bw = 50.0
+        rationale = (
+            f"Initial measured QoE ({initial_record.measured_qoe:.4f}) fell below target "
+            f"({target_qoe:.4f}). Upgraded bandwidth from {initial_bandwidth_mhz:.1f} MHz to "
+            f"{corrected_bw:.1f} MHz while maintaining Tx power at {total_tx_power_dbm:.1f} dBm."
+        )
+
+        # Run at most one corrective simulation
+        corrective_record = self.run_single_simulation(
+            ue_count=ue_count,
+            bandwidth_mhz=corrected_bw,
+            total_tx_power_dbm=total_tx_power_dbm,
+            scenario_size_m=scenario_size_m,
+            flow_type=flow_type,
+            lambda_val=lambda_val,
+            sim_time_str=sim_time_str,
+            run_tag="corrective",
+        )
+
+        corrected_metrics = {
+            "measured_qoe": corrective_record.measured_qoe,
+            "measured_throughput_mbps": corrective_record.measured_throughput_mbps,
+            "measured_delay_ms": corrective_record.measured_delay_ms,
+            "measured_jitter_ms": corrective_record.measured_jitter_ms,
+            "measured_packet_loss": corrective_record.measured_packet_loss,
+            "is_outage": corrective_record.is_outage,
+            "sim_success": corrective_record.sim_success,
+        }
+
+        if not corrective_record.sim_success:
+            rec = QoERecoveryRecord(
+                run_id=recovery_run_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                target_qoe=target_qoe,
+                recovery_attempted=True,
+                status="SIMULATION_FAILED",
+                rationale=rationale,
+                previous_bandwidth_mhz=initial_bandwidth_mhz,
+                corrected_bandwidth_mhz=corrected_bw,
+                fixed_parameters=fixed_params,
+                initial_metrics=initial_metrics,
+                corrected_metrics=corrected_metrics,
+                target_achieved=False,
+                initial_record=initial_record,
+                corrective_record=corrective_record,
+                error_message=corrective_record.error_message or "Corrective simulation failed",
+            )
+            self.persist_recovery_record(rec, recovery_results_csv_path)
+            return rec
+
+        target_achieved = corrective_record.measured_qoe >= target_qoe
+        recovery_status = "SUCCESS" if target_achieved else "TARGET_NOT_MET"
+
+        rec = QoERecoveryRecord(
+            run_id=recovery_run_id,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            target_qoe=target_qoe,
+            recovery_attempted=True,
+            status=recovery_status,
+            rationale=rationale,
+            previous_bandwidth_mhz=initial_bandwidth_mhz,
+            corrected_bandwidth_mhz=corrected_bw,
+            fixed_parameters=fixed_params,
+            initial_metrics=initial_metrics,
+            corrected_metrics=corrected_metrics,
+            target_achieved=target_achieved,
+            initial_record=initial_record,
+            corrective_record=corrective_record,
+            error_message=None,
+        )
+        self.persist_recovery_record(rec, recovery_results_csv_path)
+        return rec
+
     def persist_record(self, record: ClosedLoopVerificationRecord) -> None:
         """Append record to results CSV."""
         self.results_csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,6 +584,53 @@ class ClosedLoopVerifier:
             df.to_csv(self.results_csv_path, mode="a", header=False, index=False)
         else:
             df.to_csv(self.results_csv_path, index=False)
+
+    def persist_recovery_record(
+        self,
+        record: QoERecoveryRecord,
+        csv_path: str | Path,
+    ) -> None:
+        """Append recovery summary record to recovery results CSV."""
+        target_path = Path(csv_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_row = {
+            "run_id": record.run_id,
+            "timestamp": record.timestamp,
+            "target_qoe": record.target_qoe,
+            "recovery_attempted": record.recovery_attempted,
+            "status": record.status,
+            "previous_bandwidth_mhz": record.previous_bandwidth_mhz,
+            "corrected_bandwidth_mhz": record.corrected_bandwidth_mhz,
+            "target_achieved": record.target_achieved,
+            "initial_measured_qoe": record.initial_metrics.get("measured_qoe", 0.0),
+            "corrected_measured_qoe": (
+                record.corrected_metrics.get("measured_qoe") if record.corrected_metrics else None
+            ),
+            "initial_throughput_mbps": record.initial_metrics.get("measured_throughput_mbps", 0.0),
+            "corrected_throughput_mbps": (
+                record.corrected_metrics.get("measured_throughput_mbps") if record.corrected_metrics else None
+            ),
+            "initial_delay_ms": record.initial_metrics.get("measured_delay_ms", 0.0),
+            "corrected_delay_ms": (
+                record.corrected_metrics.get("measured_delay_ms") if record.corrected_metrics else None
+            ),
+            "initial_jitter_ms": record.initial_metrics.get("measured_jitter_ms", 0.0),
+            "corrected_jitter_ms": (
+                record.corrected_metrics.get("measured_jitter_ms") if record.corrected_metrics else None
+            ),
+            "initial_packet_loss": record.initial_metrics.get("measured_packet_loss", 0.0),
+            "corrected_packet_loss": (
+                record.corrected_metrics.get("measured_packet_loss") if record.corrected_metrics else None
+            ),
+            "rationale": record.rationale,
+            "error_message": record.error_message,
+        }
+        df = pd.DataFrame([summary_row])
+        if target_path.exists():
+            df.to_csv(target_path, mode="a", header=False, index=False)
+        else:
+            df.to_csv(target_path, index=False)
+
 
 
 def main() -> None:
@@ -303,6 +683,22 @@ def main() -> None:
         default="results/phase3/verification_results.csv",
         help="Path to verification results CSV",
     )
+    parser.add_argument(
+        "--enable-recovery",
+        action="store_true",
+        help="Run QoE Recovery Mode if measured QoE is below target",
+    )
+    parser.add_argument(
+        "--target-qoe",
+        type=float,
+        default=0.80,
+        help="Target QoE threshold for recovery mode (default: 0.80)",
+    )
+    parser.add_argument(
+        "--recovery-csv",
+        default="results/phase3/recovery_results.csv",
+        help="Path to recovery results CSV",
+    )
     args = parser.parse_args()
 
     verifier = ClosedLoopVerifier(
@@ -313,6 +709,8 @@ def main() -> None:
     print("\n" + "=" * 70)
     print("PHASE 3: CLOSED-LOOP NS-3 5G VERIFICATION")
     print("Mode: Offline Simulation-Based Verification (NOT Live Control)")
+    if args.enable_recovery:
+        print(f"Feature: QoE Recovery Mode (Target QoE: {args.target_qoe:.2f})")
     print("=" * 70)
 
     print("\n[1] NETWORK CONTEXT:")
@@ -320,6 +718,44 @@ def main() -> None:
     print(f"  Area Size:           {args.scenario_size} m")
     print(f"  Flow Type:           {args.flow_type}")
     print(f"  Packet Rate:         {args.lambda_val} pkts/s")
+
+    if args.enable_recovery:
+        print(f"  Initial Bandwidth:   {args.baseline_bandwidth} MHz")
+        recovery_rec = verifier.run_verification_with_recovery(
+            ue_count=args.ue_count,
+            initial_bandwidth_mhz=args.baseline_bandwidth,
+            total_tx_power_dbm=args.baseline_power,
+            scenario_size_m=args.scenario_size,
+            flow_type=args.flow_type,
+            lambda_val=args.lambda_val,
+            target_qoe=args.target_qoe,
+            sim_time_str=args.sim_time,
+            recovery_results_csv_path=args.recovery_csv,
+        )
+
+        print("\n[2] QOE RECOVERY EXECUTION & DIAGNOSTICS:")
+        print(f"  Recovery Status:     {recovery_rec.status}")
+        print(f"  Recovery Attempted:  {recovery_rec.recovery_attempted}")
+        print(f"  Target Achieved:     {recovery_rec.target_achieved}")
+        print(f"  Rationale:           {recovery_rec.rationale}")
+        print(f"  Initial BW:          {recovery_rec.previous_bandwidth_mhz} MHz")
+        if recovery_rec.corrected_bandwidth_mhz is not None:
+            print(f"  Corrected BW:        {recovery_rec.corrected_bandwidth_mhz} MHz")
+
+        print("\n[3] MEASURED METRICS COMPARISON:")
+        print(f"  Initial Measured QoE:   {recovery_rec.initial_metrics.get('measured_qoe', 0.0):.4f}")
+        if recovery_rec.corrected_metrics:
+            print(f"  Corrected Measured QoE: {recovery_rec.corrected_metrics.get('measured_qoe', 0.0):.4f}")
+            print(f"  Throughput (Initial -> Corrected): {recovery_rec.initial_metrics.get('measured_throughput_mbps', 0.0):.2f} -> {recovery_rec.corrected_metrics.get('measured_throughput_mbps', 0.0):.2f} Mbps")
+            print(f"  Delay (Initial -> Corrected):      {recovery_rec.initial_metrics.get('measured_delay_ms', 0.0):.2f} -> {recovery_rec.corrected_metrics.get('measured_delay_ms', 0.0):.2f} ms")
+            print(f"  Jitter (Initial -> Corrected):     {recovery_rec.initial_metrics.get('measured_jitter_ms', 0.0):.2f} -> {recovery_rec.corrected_metrics.get('measured_jitter_ms', 0.0):.2f} ms")
+            print(f"  Loss (Initial -> Corrected):       {recovery_rec.initial_metrics.get('measured_packet_loss', 0.0):.4f} -> {recovery_rec.corrected_metrics.get('measured_packet_loss', 0.0):.4f}")
+
+        print("\n[4] PERSISTENCE & TRACEABILITY:")
+        print(f"  Recovery CSV:        {args.recovery_csv}")
+        print(f"  Verification CSV:    {verifier.results_csv_path}")
+        print("=" * 70 + "\n")
+        return
 
     rec = verifier.run_closed_loop_verification(
         ue_count=args.ue_count,
@@ -372,6 +808,7 @@ def main() -> None:
     print(f"  Run Directory:       {rec.run_dir}")
     print(f"  Results CSV:         {verifier.results_csv_path}")
     print("=" * 70 + "\n")
+
 
 
 if __name__ == "__main__":

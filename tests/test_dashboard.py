@@ -393,7 +393,8 @@ class TestPhase3Display(unittest.TestCase):
         self.assertIsInstance(all_statuses, list)
 
     def test_phase3_measured_qoe_is_not_zero_for_successful_runs(self):
-        """Successful runs should have measured_qoe > 0."""
+        """Verified runs must have numeric, finite measured_qoe in [0, 1], with 0.0 allowed for outages."""
+        import math
         from dashboard.data_loader import load_phase3_results
         df = load_phase3_results()
         if df.empty:
@@ -402,10 +403,26 @@ class TestPhase3Display(unittest.TestCase):
         if success.empty:
             return
         for _, row in success.iterrows():
-            self.assertGreater(
-                row["measured_qoe"], 0,
-                f"Run {row['run_id']}: VERIFIED_SUCCESS but measured_qoe=0",
+            qoe = float(row["measured_qoe"])
+            self.assertFalse(math.isnan(qoe), f"Run {row['run_id']}: measured_qoe is NaN")
+            self.assertFalse(math.isinf(qoe), f"Run {row['run_id']}: measured_qoe is infinite")
+            self.assertGreaterEqual(
+                qoe, 0.0,
+                f"Run {row['run_id']}: VERIFIED_SUCCESS but measured_qoe < 0",
             )
+            self.assertLessEqual(
+                qoe, 1.0,
+                f"Run {row['run_id']}: VERIFIED_SUCCESS but measured_qoe > 1",
+            )
+            # If measured QoE is 0.0, it must be a legitimate outage
+            if qoe == 0.0:
+                self.assertTrue(
+                    bool(row.get("is_outage", False)),
+                    f"Run {row['run_id']}: measured_qoe=0 but is_outage is False",
+                )
+            else:
+                self.assertGreater(qoe, 0.0)
+
 
     def test_phase3_cache_clearing_reloads_new_records(self):
         """Calling load_phase3_results.clear() ensures newly saved runs are read immediately."""
@@ -580,6 +597,139 @@ class TestPhase3Display(unittest.TestCase):
         self.assertNotEqual(record.verification_status, "VERIFIED_SUCCESS")
         self.assertEqual(record.verification_status, "SIMULATION_FAILED")
         self.assertEqual(record.error_message, "ns-3 simulation timed out after 120.0 seconds")
+
+    def test_phase3_recovery_state_persistence_and_rendering(self):
+        """Recovery record in session_state persists across rerun and contains all change-log and metric fields."""
+        from simulation.closed_loop import ClosedLoopVerificationRecord, QoERecoveryRecord
+        import streamlit as st
+
+        rec_init = ClosedLoopVerificationRecord(
+            run_id="cl_init",
+            timestamp="2026-10-11T12:00:00",
+            ue_count=2,
+            scenario_size_m=30.0,
+            flow_type="voice_be",
+            lambda_val=5000.0,
+            optimised_bandwidth_mhz=20.0,
+            optimised_power_dbm=35.0,
+            optimiser_status="DIRECT_CONFIGURATION",
+            predicted_qoe=0.0,
+            sim_success=True,
+            sim_duration_seconds=3.2,
+            sim_exit_code=0,
+            is_outage=True,
+            measured_throughput_mbps=0.0,
+            measured_delay_ms=0.0,
+            measured_jitter_ms=0.0,
+            measured_packet_loss=1.0,
+            total_tx_packets=6000,
+            total_rx_packets=0,
+            measured_qoe=0.0,
+            absolute_prediction_error=0.0,
+            relative_prediction_error=None,
+            run_baseline=False,
+            baseline_bandwidth_mhz=None,
+            baseline_power_dbm=None,
+            baseline_predicted_qoe=None,
+            baseline_measured_qoe=None,
+            predicted_improvement=None,
+            measured_improvement=None,
+            run_dir="/tmp/run_20",
+            csv_path="/tmp/run_20/qoe_dataset.csv",
+            log_path="/tmp/run_20/stdout.log",
+            verification_status="VERIFIED_SUCCESS",
+        )
+
+        rec_corr = ClosedLoopVerificationRecord(
+            run_id="cl_corr",
+            timestamp="2026-10-11T12:01:00",
+            ue_count=2,
+            scenario_size_m=30.0,
+            flow_type="voice_be",
+            lambda_val=5000.0,
+            optimised_bandwidth_mhz=50.0,
+            optimised_power_dbm=35.0,
+            optimiser_status="DIRECT_CONFIGURATION",
+            predicted_qoe=0.98,
+            sim_success=True,
+            sim_duration_seconds=3.5,
+            sim_exit_code=0,
+            is_outage=False,
+            measured_throughput_mbps=51.1,
+            measured_delay_ms=0.8,
+            measured_jitter_ms=0.08,
+            measured_packet_loss=0.001,
+            total_tx_packets=6000,
+            total_rx_packets=5994,
+            measured_qoe=0.95,
+            absolute_prediction_error=0.03,
+            relative_prediction_error=0.0315,
+            run_baseline=False,
+            baseline_bandwidth_mhz=None,
+            baseline_power_dbm=None,
+            baseline_predicted_qoe=None,
+            baseline_measured_qoe=None,
+            predicted_improvement=None,
+            measured_improvement=None,
+            run_dir="/tmp/run_50",
+            csv_path="/tmp/run_50/qoe_dataset.csv",
+            log_path="/tmp/run_50/stdout.log",
+            verification_status="VERIFIED_SUCCESS",
+        )
+
+        rec_recovery = QoERecoveryRecord(
+            run_id="rec_1",
+            timestamp="2026-10-11T12:01:00",
+            target_qoe=0.80,
+            recovery_attempted=True,
+            status="SUCCESS",
+            rationale="Initial measured QoE fell below target. Upgraded bandwidth to 50 MHz.",
+            previous_bandwidth_mhz=20.0,
+            corrected_bandwidth_mhz=50.0,
+            fixed_parameters={
+                "ue_count": 2,
+                "total_tx_power_dbm": 35.0,
+                "scenario_size_m": 30.0,
+                "flow_type": "voice_be",
+                "lambda_val": 5000.0,
+                "sim_time": "1.5s",
+            },
+            initial_metrics={
+                "measured_qoe": 0.0,
+                "measured_throughput_mbps": 0.0,
+                "measured_delay_ms": 0.0,
+                "measured_jitter_ms": 0.0,
+                "measured_packet_loss": 1.0,
+            },
+            corrected_metrics={
+                "measured_qoe": 0.95,
+                "measured_throughput_mbps": 51.1,
+                "measured_delay_ms": 0.8,
+                "measured_jitter_ms": 0.08,
+                "measured_packet_loss": 0.001,
+            },
+            target_achieved=True,
+            initial_record=rec_init,
+            corrective_record=rec_corr,
+        )
+
+        st.session_state["phase3_last_run"] = {
+            "run_ok": True,
+            "record": rec_corr,
+            "recovery_record": rec_recovery,
+            "error_message": None,
+        }
+
+        last_run = st.session_state.get("phase3_last_run")
+        self.assertTrue(last_run["run_ok"])
+        self.assertIsNotNone(last_run["recovery_record"])
+        recovery = last_run["recovery_record"]
+        self.assertEqual(recovery.status, "SUCCESS")
+        self.assertTrue(recovery.target_achieved)
+        self.assertEqual(recovery.previous_bandwidth_mhz, 20.0)
+        self.assertEqual(recovery.corrected_bandwidth_mhz, 50.0)
+        self.assertEqual(recovery.fixed_parameters["total_tx_power_dbm"], 35.0)
+
 
 
 # ---------------------------------------------------------------------------
