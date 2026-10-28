@@ -33,6 +33,9 @@ class TestNs3Runner(unittest.TestCase):
 
         self.assertEqual(args[0], "/mock/path/ns3-exec")
         self.assertIn("--ueNumPergNb=4", args)
+        self.assertIn("--ueCount=4", args)
+        self.assertIn("--gNbNum=1", args)
+        self.assertIn("--ueAssociationPolicy=closest", args)
         self.assertIn("--bandwidthBand1=50000000", args)
         self.assertIn("--totalTxPower=35.0", args)
         self.assertIn("--scenarioSize=30.0", args)
@@ -41,6 +44,10 @@ class TestNs3Runner(unittest.TestCase):
         self.assertIn("--simTime=1s", args)
         self.assertIn("--outputDir=/tmp/mock_run_1", args)
         self.assertIn("--simTag=sim_summary.txt", args)
+
+    def test_relative_executable_path_is_resolved_before_run_directory_change(self):
+        runner = Ns3Runner(executable_path="relative/path/ns3-exec")
+        self.assertTrue(runner.executable_path.is_absolute())
 
     @patch("subprocess.run")
     def test_successful_simulation_run(self, mock_subproc):

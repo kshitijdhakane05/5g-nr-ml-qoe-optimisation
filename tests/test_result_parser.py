@@ -9,6 +9,7 @@ from simulation.result_parser import (
     calculate_packet_loss,
     calculate_qoe_proxy,
     parse_simulation_csv,
+    validate_simulation_csv,
 )
 
 
@@ -137,6 +138,55 @@ class TestResultParser(unittest.TestCase):
             self.assertIn("Malformed row", res_bad.error_message)
         finally:
             tmp_path.unlink()
+
+    def test_validate_simulation_csv_recomputes_metrics_and_configuration(self):
+        loss = calculate_packet_loss(100, 90)
+        qoe = calculate_qoe_proxy(10.0, 10.0, 2.0, loss, rx_packets=90)
+        row = (
+            f"7,2,20000,50,35,30,1,100,90,10,10,10,2,{loss:.9f},{qoe:.9f}\n"
+            f"7,2,20000,50,35,30,2,100,90,10,10,10,2,{loss:.9f},{qoe:.9f}\n"
+        )
+        content = (
+            "scenario_id,ue_count,lambda_be,bandwidth_mhz,total_tx_power_dbm,scenario_size_m,"
+            "flow_id,tx_packets,rx_packets,lost_packets,throughput_mbps,delay_ms,jitter_ms,packet_loss,qoe_proxy\n"
+            + row
+        )
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".csv") as tmp:
+            tmp.write(content)
+            path = Path(tmp.name)
+        try:
+            valid, error = validate_simulation_csv(
+                path,
+                expected_config={
+                    "scenario_id": 7, "ue_count": 2, "lambda_be": 20000,
+                    "bandwidth_mhz": 50, "total_tx_power_dbm": 35, "scenario_size_m": 30,
+                },
+                expected_flow_count=2,
+            )
+            self.assertTrue(valid, error)
+        finally:
+            path.unlink()
+
+    def test_validate_simulation_csv_rejects_nonfinite_and_wrong_row_count(self):
+        content = (
+            "scenario_id,ue_count,lambda_be,bandwidth_mhz,total_tx_power_dbm,scenario_size_m,"
+            "flow_id,tx_packets,rx_packets,lost_packets,throughput_mbps,delay_ms,jitter_ms,packet_loss,qoe_proxy\n"
+            "7,2,20000,50,35,30,1,100,90,10,nan,10,2,0.1,0.6\n"
+        )
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".csv") as tmp:
+            tmp.write(content)
+            path = Path(tmp.name)
+        try:
+            valid, error = validate_simulation_csv(path)
+            self.assertFalse(valid)
+            self.assertIn("non-finite", error.lower())
+            content = content.replace(",nan,", ",10,")
+            path.write_text(content, encoding="utf-8")
+            valid, error = validate_simulation_csv(path, expected_flow_count=2)
+            self.assertFalse(valid)
+            self.assertIn("flow rows", error.lower())
+        finally:
+            path.unlink()
 
 
 if __name__ == "__main__":

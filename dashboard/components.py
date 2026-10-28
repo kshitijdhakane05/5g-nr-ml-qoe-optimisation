@@ -22,6 +22,96 @@ COLOUR_WARNING   = "#ff7f0e"   # orange
 COLOUR_DANGER    = "#d62728"   # red
 COLOUR_OUTAGE    = "#9467bd"   # purple
 
+DASHBOARD_PALETTE = ["#42d3e8", "#5f91ff", "#43c99a", "#f6b94a", "#ea6f78", "#b598ff"]
+
+
+def render_dashboard_theme() -> None:
+    """Apply the shared dark operations-dashboard visual language."""
+    st.markdown(
+        """
+        <style>
+        :root {
+          --app-bg: #0a1220;
+          --app-panel: #111d2e;
+          --app-panel-raised: #16243a;
+          --app-border: #26364d;
+          --app-text: #edf4fc;
+          --app-muted: #a7b6c9;
+          --app-cyan: #42d3e8;
+        }
+        [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+          background: var(--app-bg);
+          color: var(--app-text);
+        }
+        [data-testid="stSidebar"] {
+          background: #0d192a;
+          border-right: 1px solid var(--app-border);
+        }
+        [data-testid="stMainBlockContainer"] {
+          max-width: 1580px;
+          padding-top: 1.35rem;
+          padding-bottom: 3rem;
+        }
+        [data-testid="stMetric"] {
+          background: var(--app-panel);
+          border: 1px solid var(--app-border);
+          border-radius: 12px;
+          padding: 0.85rem 1rem;
+          min-height: 100px;
+        }
+        [data-testid="stMetricLabel"] p, [data-testid="stCaptionContainer"] p {
+          color: var(--app-muted);
+        }
+        [data-testid="stMetricValue"] { color: var(--app-text); }
+        [data-testid="stVerticalBlockBorderWrapper"] {
+          border-color: var(--app-border);
+          border-radius: 12px;
+        }
+        [data-testid="stDataFrame"], [data-testid="stTable"] {
+          border: 1px solid var(--app-border);
+          border-radius: 10px;
+          overflow: hidden;
+        }
+        h1, h2, h3 { letter-spacing: -0.02em; color: var(--app-text); }
+        p, label, li { color: var(--app-text); }
+        a { color: var(--app-cyan) !important; }
+        button[kind="primary"] {
+          border: 1px solid #42d3e8;
+          background: #087f91;
+        }
+        div[data-testid="stAlert"] { border-radius: 10px; }
+        @media (max-width: 760px) {
+          [data-testid="stMainBlockContainer"] { padding: 1rem 0.8rem 2rem; }
+          [data-testid="stMetric"] { min-height: 84px; padding: 0.65rem; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def page_header(title: str, description: str, context: str | None = None) -> None:
+    """Render a consistent concise title and supporting description."""
+    st.title(title)
+    st.caption(description)
+    if context:
+        st.info(context)
+
+
+def style_figure(figure: go.Figure) -> go.Figure:
+    """Style Plotly figures to stay readable on the dashboard's dark surfaces."""
+    figure.update_layout(
+        paper_bgcolor="#111d2e",
+        plot_bgcolor="#111d2e",
+        font={"color": "#e5edf7", "family": "Inter, Segoe UI, sans-serif", "size": 12},
+        colorway=DASHBOARD_PALETTE,
+        hoverlabel={"bgcolor": "#192a40", "font": {"color": "#f4f8fc"}},
+        legend={"bgcolor": "rgba(0,0,0,0)"},
+    )
+    figure.update_xaxes(showgrid=False, linecolor="#516178", zerolinecolor="#516178")
+    figure.update_yaxes(showgrid=True, gridcolor="#26364d", linecolor="#516178", zerolinecolor="#516178")
+    return figure
+
 STATUS_COLOURS = {
     "VERIFIED_SUCCESS":   COLOUR_SUCCESS,
     "SIMULATION_FAILED":  COLOUR_DANGER,
@@ -89,7 +179,7 @@ def qoe_gauge(qoe: float, title: str = "Predicted QoE") -> go.Figure:
         },
     ))
     fig.update_layout(height=280, margin=dict(t=40, b=20, l=20, r=20))
-    return fig
+    return style_figure(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +202,7 @@ def qoe_histogram(df: pd.DataFrame, nbins: int = 30) -> go.Figure:
         height=350,
         margin=dict(t=40, b=40, l=40, r=20),
     )
-    return fig
+    return style_figure(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +225,7 @@ def qoe_vs_ue_box(df: pd.DataFrame) -> go.Figure:
         color_discrete_sequence=px.colors.qualitative.Set2,
     )
     fig.update_layout(height=380, margin=dict(t=40, b=40, l=40, r=20))
-    return fig
+    return style_figure(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +256,7 @@ def throughput_vs_delay_scatter(df: pd.DataFrame) -> go.Figure:
         color_discrete_sequence=px.colors.qualitative.Plotly,
     )
     fig.update_layout(height=400, margin=dict(t=40, b=40, l=40, r=20))
-    return fig
+    return style_figure(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +287,14 @@ def model_comparison_bar(model_results_df: pd.DataFrame) -> go.Figure:
         height=360,
         margin=dict(t=50, b=60, l=40, r=20),
     )
-    return fig
+    return style_figure(fig)
 
 
 def model_r2_bar(model_results_df: pd.DataFrame) -> go.Figure:
     """Bar chart of test R² for each benchmarked model."""
     df = model_results_df.copy()
     if "test_r2" not in df.columns:
-        return go.Figure()
+        return style_figure(go.Figure())
     fig = px.bar(
         df,
         x="model_name",
@@ -216,7 +306,7 @@ def model_r2_bar(model_results_df: pd.DataFrame) -> go.Figure:
         range_y=[0, 1.05],
     )
     fig.update_layout(height=340, margin=dict(t=50, b=60, l=40, r=20))
-    return fig
+    return style_figure(fig)
 
 
 # ---------------------------------------------------------------------------

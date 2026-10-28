@@ -55,7 +55,7 @@ class Ns3Runner:
     ) -> None:
         self.executable_path = (
             Path(executable_path) if executable_path else DEFAULT_NS3_BINARY
-        )
+        ).resolve()
         self.output_base = Path(default_output_base).resolve()
         self.default_timeout = default_timeout_seconds
 
@@ -87,6 +87,8 @@ class Ns3Runner:
             - sim_tag -> --simTag
         """
         ue_count = int(config.get("ue_count", 2))
+        gnb_count = int(config.get("gnb_count", 1))
+        ue_association_policy = str(config.get("ue_association_policy", "closest"))
         bw_hz = int(float(config.get("bandwidth_mhz", 50.0)) * 1_000_000)
         power_dbm = float(config.get("total_tx_power_dbm", 35.0))
         size_m = float(config.get("scenario_size_m", 30.0))
@@ -97,6 +99,9 @@ class Ns3Runner:
         args = [
             str(self.executable_path),
             f"--ueNumPergNb={ue_count}",
+            f"--ueCount={ue_count}",
+            f"--gNbNum={gnb_count}",
+            f"--ueAssociationPolicy={ue_association_policy}",
             f"--bandwidthBand1={bw_hz}",
             f"--totalTxPower={power_dbm}",
             f"--scenarioSize={size_m}",

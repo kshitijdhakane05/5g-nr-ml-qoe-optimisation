@@ -5,11 +5,11 @@ Entry point: `streamlit run app.py`
 
 Pages
 -----
-  1. Overview
-  2. Simulation Explorer
-  3. QoE Predictor
-  4. Network Optimiser
-  5. Closed-Loop Verification
+  1. Live Simulator
+  2. Overview
+  3. Experiments
+  4. Analytics
+  5. More tools (existing supporting pages)
 
 IMPORTANT
 ---------
@@ -32,12 +32,13 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import streamlit as st
+from dashboard.branding import PROJECT_DISPLAY_NAME
 
 # ---------------------------------------------------------------------------
 # Page config — must be the first Streamlit call
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="5G NR QoE Optimisation Dashboard",
+    page_title=f"{PROJECT_DISPLAY_NAME} · Live ns-3 Simulator",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -48,11 +49,14 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 from dashboard.data_loader import (          # noqa: E402
     load_processed_dataset,
+    load_raw_dataset,
     load_model_results,
     load_predictions,
     load_phase3_results,
     dataset_summary,
     PHASE3_RESULTS,
+    DATA_RAW,
+    DATA_PROCESSED,
 )
 from dashboard.components import (           # noqa: E402
     kpi_row,
@@ -69,117 +73,61 @@ from dashboard.components import (           # noqa: E402
     COLOUR_SUCCESS,
     COLOUR_DANGER,
     COLOUR_WARNING,
+    render_dashboard_theme,
 )
+from dashboard.operations_views import render_analytics, render_experiments, render_overview
+
+render_dashboard_theme()
 
 # ---------------------------------------------------------------------------
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 PAGES = [
+    "🛰️ Live Simulator",
     "📊 Overview",
+    "🧪 Experiments",
+    "📈 Analytics",
+    "🧰 More tools",
+]
+LEGACY_PAGES = [
     "🔍 Simulation Explorer",
     "🤖 QoE Predictor",
     "⚙️ Network Optimiser",
     "🔁 Closed-Loop Verification",
+    "🧪 Experimental KPI Results (offline)",
 ]
 
 with st.sidebar:
-    st.title("📡 5G NR Dashboard")
-    st.caption("Phase 4 — ML-based QoE Optimisation")
+    st.title(f"📡 {PROJECT_DISPLAY_NAME}")
+    st.caption("ns-3 network operations")
     st.divider()
-    page = st.radio("Navigate to", PAGES, label_visibility="collapsed")
+    page = st.radio("Main navigation", PAGES, label_visibility="collapsed", key="relay_main_navigation")
+    if page == PAGES[4]:
+        page = st.selectbox("Supporting tools", LEGACY_PAGES, key="relay_supporting_tool")
     st.divider()
-    research_disclaimer()
+    with st.expander("Project scope"):
+        research_disclaimer()
 
 
 # ===========================================================================
-# PAGE 1 — OVERVIEW
+# PRIMARY ROUTES
 # ===========================================================================
 if page == PAGES[0]:
-    st.title("📊 Project Overview")
-    st.markdown(
-        "End-to-end ML-based 5G NR network optimisation: "
-        "ns-3 simulation → QoE prediction → configuration search → ns-3 verification."
-    )
-    research_disclaimer()
+    from dashboard.live_ns3_control import render_live_ns3_control
 
-    df = load_processed_dataset()
-    summary = dataset_summary(df)
-    model_df = load_model_results()
-    phase3_df = load_phase3_results()
-
-    # --- KPI row 1: dataset stats ---
-    st.subheader("Dataset")
-    if summary:
-        kpi_row([
-            {"label": "Total Flow Records",   "value": f"{summary['rows']:,}"},
-            {"label": "Unique Scenarios",     "value": summary["unique_scenarios"]},
-            {"label": "Unique Flows",         "value": summary["unique_flows"]},
-            {"label": "UE-Count Range",       "value": f"{summary['ue_count_range'][0]}–{summary['ue_count_range'][1]}"},
-            {"label": "Outage Flows",         "value": summary["outage_count"]},
-        ])
-    else:
-        st.warning("Processed dataset not found.")
-
-    # --- KPI row 2: best model ---
-    st.subheader("ML Model (Best: Random Forest)")
-    if not model_df.empty:
-        best = model_df.sort_values("test_r2", ascending=False).iloc[0]
-        kpi_row([
-            {"label": "Model",     "value": best.get("model_name", "—")},
-            {"label": "Test MAE",  "value": f"{best.get('test_mae',0):.4f}"},
-            {"label": "Test RMSE", "value": f"{best.get('test_rmse',0):.4f}"},
-            {"label": "Test R²",   "value": f"{best.get('test_r2',0):.4f}"},
-        ])
-    else:
-        st.warning("`results/ml/model_results.csv` not found.")
-
-    # --- KPI row 3: phase 3 verification ---
-    st.subheader("Phase 3: Closed-Loop Verification Runs")
-    if not phase3_df.empty and "verification_status" in phase3_df.columns:
-        n_total   = len(phase3_df)
-        n_success = int((phase3_df["verification_status"] == "VERIFIED_SUCCESS").sum())
-        n_failed  = int((phase3_df["verification_status"] == "SIMULATION_FAILED").sum())
-        avg_err   = phase3_df["absolute_prediction_error"].dropna().mean() if "absolute_prediction_error" in phase3_df.columns else None
-        kpi_row([
-            {"label": "Total Runs",    "value": n_total},
-            {"label": "✅ Successful", "value": n_success},
-            {"label": "❌ Failed",     "value": n_failed},
-            {"label": "Mean |Error|",  "value": f"{avg_err:.4f}" if avg_err is not None else "—"},
-        ])
-        latest = phase3_df.sort_values("timestamp", ascending=False).iloc[0] if "timestamp" in phase3_df.columns else phase3_df.iloc[0]
-        with st.expander("Latest verification run"):
-            st.json({k: str(v) for k, v in latest.items()})
-    else:
-        st.info("No Phase-3 verification runs recorded yet.")
-
-    # --- Workflow diagram ---
-    st.subheader("Workflow")
-    st.markdown("""
-```
-Network Context (UE count, flow type, λ, scenario size)
-    │
-    ▼
-Phase 2: Offline Optimiser  →  selects bandwidth configuration
-    │
-    ▼
-Phase 3: ns-3 Simulation  →  measures real QoE metrics
-    │
-    ▼
-QoE Comparison  →  Predicted vs Measured (verification record)
-```
-*Phase 1: ML model trained on ns-3 data — provides the QoE surrogate for Phase 2.*
-""")
-
-    # --- QoE distribution overview chart ---
-    if not df.empty and "qoe_proxy" in df.columns:
-        st.subheader("QoE Distribution (full dataset)")
-        st.plotly_chart(qoe_histogram(df), use_container_width=True)
+    render_live_ns3_control(st)
+elif page == PAGES[1]:
+    render_overview(st)
+elif page == PAGES[2]:
+    render_experiments(st)
+elif page == PAGES[3]:
+    render_analytics(st)
 
 
 # ===========================================================================
 # PAGE 2 — SIMULATION EXPLORER
 # ===========================================================================
-elif page == PAGES[1]:
+elif page == LEGACY_PAGES[0]:
     st.title("🔍 Simulation Data Explorer")
     research_disclaimer()
 
@@ -189,6 +137,34 @@ elif page == PAGES[1]:
         st.stop()
 
     st.caption(f"Dataset: `data/processed/qoe_dataset.csv`  |  {len(df):,} rows")
+    raw_df = load_raw_dataset()
+    with st.expander("Dataset context and coverage", expanded=False):
+        context_cols = st.columns(4)
+        context_cols[0].metric("Processed rows", f"{len(df):,}")
+        context_cols[1].metric("Raw rows", f"{len(raw_df):,}" if not raw_df.empty else "Unavailable")
+        scenario_count = int(df["scenario_id"].nunique()) if "scenario_id" in df.columns else None
+        context_cols[2].metric("Distinct scenario IDs", f"{scenario_count:,}" if scenario_count is not None else "Unavailable")
+        context_cols[3].metric("Independent run IDs", "Not stored")
+        coverage = []
+        for label, frame in (("Processed", df), ("Raw", raw_df)):
+            if not frame.empty and "flow_type" in frame.columns:
+                parts = frame["flow_type"].value_counts(dropna=False).to_dict()
+                coverage.append({"Dataset": label, "Rows by workload": ", ".join(
+                    f"{key}: {value}" for key, value in sorted(parts.items(), key=lambda item: str(item[0]))
+                )})
+        if coverage:
+            st.dataframe(pd.DataFrame(coverage), hide_index=True, width="stretch")
+        else:
+            st.caption("Workload composition is unavailable in the loaded schema.")
+        st.caption(
+            "Both files are ns-3 generated flow-level data; the processed file adds derived columns. "
+            "Scenario ID is the available run grouping key; separate real-world baseline provenance is not encoded in these CSVs."
+        )
+        for label, path in (("Raw file modified", DATA_RAW), ("Processed file modified", DATA_PROCESSED)):
+            if path.exists():
+                st.caption(f"{label}: {pd.Timestamp(path.stat().st_mtime, unit='s', tz='UTC').isoformat()}")
+            else:
+                st.caption(f"{label}: unavailable")
 
     # --- Filters ---
     with st.expander("🔧 Filters", expanded=True):
@@ -262,7 +238,7 @@ elif page == PAGES[1]:
 # ===========================================================================
 # PAGE 3 — QoE PREDICTOR
 # ===========================================================================
-elif page == PAGES[2]:
+elif page == LEGACY_PAGES[1]:
     st.title("🤖 QoE Predictor")
     st.markdown(
         "Enter a network configuration below and click **Predict** to get "
@@ -379,7 +355,7 @@ elif page == PAGES[2]:
 # ===========================================================================
 # PAGE 4 — NETWORK OPTIMISER
 # ===========================================================================
-elif page == PAGES[3]:
+elif page == LEGACY_PAGES[2]:
     st.title("⚙️ Network Optimiser")
     st.markdown(
         "Given a network context, the optimiser searches the supported "
@@ -499,6 +475,24 @@ elif page == PAGES[3]:
                         qoe_gauge(float(best.get("predicted_qoe", 0)), "Best Config — Predicted QoE"),
                         use_container_width=True,
                     )
+                    from dashboard.config_explanations import render_configuration_change
+
+                    with st.expander("Explain the proposed configuration change", expanded=True):
+                        optimizer_reason = (
+                            "Selected as the highest-ranked configuration under the existing predicted-QoE search; "
+                            f"optimizer status: {status}. This is a model-ranking reason, not a measured network diagnosis."
+                        )
+                        optimizer_effect = (
+                            f"Production-model estimate: QoE proxy {base.get('predicted_qoe', 0):.4f} at baseline "
+                            f"to {best.get('predicted_qoe', 0):.4f} for the proposal. This is unverified until an ns-3 run."
+                        )
+                        render_configuration_change(
+                            st, base, best, reason=optimizer_reason,
+                            status="Proposed · model-ranked, not simulated",
+                            expected_effect=optimizer_effect, key="optimizer_configuration_diff",
+                            evaluation_result="Not evaluated by ns-3; the proposal is a prediction only.",
+                            changed_only=False,
+                        )
 
                 # Baseline comparison
                 if base:
@@ -523,7 +517,7 @@ elif page == PAGES[3]:
 # ===========================================================================
 # PAGE 5 — CLOSED-LOOP VERIFICATION
 # ===========================================================================
-elif page == PAGES[4]:
+elif page == LEGACY_PAGES[3]:
     st.title("🔁 Closed-Loop Verification")
     st.markdown(
         "Run the Phase 3 pipeline: Optimiser → ns-3 simulation → QoE comparison.  "
@@ -820,4 +814,10 @@ elif page == PAGES[4]:
                     r_cols[1].metric("Measured QoE", f"{meas_val:.4f}")
                     r_cols[2].metric("Abs Error", f"{abs_val:.4f}" if abs_val is not None else "—")
 
+elif page == LEGACY_PAGES[4]:
+    # This isolated page displays saved TU Wien grouped OOF results only.
+    # It does not invoke the production QoE predictor or simulation workflow.
+    from dashboard.experimental_kpi_results import render_experimental_kpi_results
+
+    render_experimental_kpi_results(st)
 
