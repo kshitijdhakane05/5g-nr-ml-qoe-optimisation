@@ -1,318 +1,75 @@
-# 5G Network Simulation & ML Optimisation Project
+# QoE-Aware 5G Network Control Simulator
 
-An end-to-end machine learning-based 5G network prediction and optimisation framework built on top of **ns-3 5G NR (3GPP TR 38.901 mmWave / FR2)** simulations running in WSL Ubuntu 24.04.
+A research prototype for observing 5G-LENA/ns-3 traffic, estimating per-user Quality of Experience (QoE), and evaluating bounded network-control actions. The main workflow is a supervised live ns-3 session in a Streamlit dashboard. It is a simulation study, not a real-network controller.
 
----
+## What the live system does
 
-## Phase 1: Machine Learning Prediction Pipeline
+- Collects measured per-UE and network telemetry from ns-3, including throughput, delay, jitter, packet loss, traffic class, serving cell, and QoE.
+- Displays a five-second, linear-trend QoE forecast after enough telemetry is available. This is a low-confidence baseline, not a validated prediction guarantee.
+- Supports **Monitor**, **Recommend**, and **Automatic** controller modes. Recommend is the default.
+- Uses adjustable per-service safety floors to identify UEs that are near or forecast to cross a floor.
+- Applies verified live offered-load pacing for the legacy low-latency + voice traffic mix. Structural changes such as bandwidth, topology, association policy, and transmit power require an ns-3 restart epoch. NGMN gaming/video traffic does not have a verified live rate-control hook.
+- Records session metadata, telemetry, controller decisions, simulator acknowledgements, and post-action verification under `results/live_sessions/`.
 
-Phase 1 establishes a reliable, non-leaking ML surrogate model to predict end-to-end Quality of Experience (`qoe_proxy`) directly from 5G network configurations and environmental parameters.
+The optional one-shot load disturbance is available only for the legacy traffic mix. It raises offered voice workload; it does not model fading or a radio outage. It requires Automatic mode and three consecutive fresh windows with every UE at or above target. Its purpose is to demonstrate measured detection and controller response to a controlled workload shock, not guaranteed advance prediction.
 
-### 1. What the Model Predicts
-The primary prediction target is **`qoe_proxy`** $\in [0.0, 1.0]$, representing user satisfaction calculated across four key quality-of-service dimensions:
-- **Throughput utility**: normalized against a 50 Mbps reference limit.
-- **Latency penalty**: exponential decay with a 50 ms characteristic scaling factor.
-- **Jitter penalty**: exponential decay with a 20 ms characteristic scaling factor.
-- **Reliability (packet delivery)**: scaled delivery success rate $(1 - \text{packet\_loss})$.
+## QoE definition and scope
 
-When packets fail to be delivered ($\text{rx\_packets} = 0$), $\text{qoe\_proxy} = 0.0$ indicates total outage.
+New live sessions calculate a service-specific score for each UE:
 
----
-
-### 2. Feature Representation
-Features represent **pre-transmission network configurations and environment context**, strictly preventing data leakage from post-simulation measurements:
-
-| Feature Name | Type | Description |
-| :--- | :--- | :--- |
-| `ue_count` | Integer | Total number of active user equipments (UEs) |
-| `bandwidth_mhz` | Float | Configured 5G NR carrier bandwidth (MHz) |
-| `total_tx_power_dbm` | Float | Base station (gNB) total transmit power (dBm) |
-| `scenario_size_m` | Float | Physical placement grid dimension ($L \times L$ meters) |
-| `flow_type_id` | Binary | Flow traffic class: `0` = Low-Latency, `1` = Voice / Best-Effort |
-| `flow_lambda` | Float | Offered packet arrival rate for this flow (pkts/s) |
-| `packet_size_bytes` | Integer | Packet payload size (`100` B for Low-Lat, `1252` B for Voice) |
-| `offered_throughput_mbps` | Float | Nominal offered traffic load (Mbps) |
-
-> **Note on Transmit Power**: In the initial 120-scenario dataset, `total_tx_power_dbm` is constant at 35 dBm. It is preserved in the feature schema to ensure seamless compatibility when power-varying datasets are generated in subsequent phases.
-
----
-
-### 3. Data Splitting & Why Scenario-Level Grouping is Mandatory
-
-A 5G simulation scenario models an entire multi-UE radio cell where all flows concurrently share base station scheduling, resource blocks, beamforming vectors, and channel fading.
-
-- **The Leakage Risk**: If individual flow rows are partitioned randomly into train and test sets (`train_test_split`), flows belonging to the same scenario appear in both sets. The model would memorize scenario-specific scheduling states and channel realizations, producing artificially inflated test scores that fail on new network deployments.
-- **The Grouped Solution**: The dataset is strictly partitioned by **`scenario_id`** using `GroupShuffleSplit` (80% train scenarios / 20% holdout test scenarios) and evaluated via 5-Fold `GroupKFold` cross-validation:
-  - **Train Scenarios**: 96 scenarios (590 flow rows)
-  - **Holdout Test Scenarios**: 24 scenarios (130 flow rows)
-  - **Scenario Overlap**: **0 scenarios** (100% clean isolation)
-
----
-
-### 4. Reproducing the Pipeline
-
-#### Setup Environment
-```bash
-# From project root
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+```text
+QoE = 0.40 × throughput satisfaction
+    + 0.25 × delay satisfaction
+    + 0.20 × jitter satisfaction
+    + 0.15 × packet-loss satisfaction
 ```
 
-#### Run Full Automated Pipeline
-```bash
-./scripts/run_ml_pipeline.sh
-```
+Throughput satisfaction is `min(measured throughput / service reference, 1)`. Delay, jitter, and packet-loss satisfaction are each `max(0, 1 − measured value / service limit)`. A UE with no received packets scores zero. The overall user QoE is the equal-weight mean of configured UEs; per-service means and a legacy pooled-flow diagnostic are shown separately.
 
-#### Run Individual Pipeline Steps
-1. **Preprocess and validate dataset**:
-   ```bash
-   python -m ml.preprocessing --raw-path data/raw/qoe_dataset.csv --output-path data/processed/qoe_dataset.csv
-   ```
-2. **Train and cross-validate baseline regressors**:
-   ```bash
-   python -m ml.train --dataset data/processed/qoe_dataset.csv
-   ```
-3. **Run inference on a new network configuration**:
-   ```bash
-   python -m ml.predict \
-     --model-path models/qoe_model.joblib \
-     --ue-count 6 \
-     --bandwidth 50 \
-     --power 35 \
-     --size 30 \
-     --flow-type voice_be \
-     --lambda-val 10000
-   ```
+This score is a network-metric proxy, not a subjective user survey or MOS measurement. In particular, the legacy voice workload is a high-rate UDP stress generator rather than a realistic codec model, and the video generator does not model playback buffering, startup delay, or adaptive resolution. The exact profile references and units are documented in the dashboard and [`docs/live-simulation.md`](docs/live-simulation.md).
 
----
+## Run the dashboard
 
-### 5. Benchmark Performance
-
-Evaluated on completely unseen test scenarios:
-
-| Model | CV MAE | CV RMSE | CV $R^2$ | Test MAE | Test RMSE | Test $R^2$ |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **DummyRegressor (Mean)** | 0.3482 | 0.3617 | -0.5768 | 0.3144 | 0.3265 | -0.0097 |
-| **LinearRegression** | 0.0582 | 0.0893 | 0.9021 | 0.0552 | 0.0883 | 0.9261 |
-| **HistGradientBoostingRegressor** | 0.0234 | 0.0523 | 0.9607 | 0.0184 | 0.0462 | 0.9798 |
-| **RandomForestRegressor** *(Best)* | **0.0189** | **0.0525** | **0.9618** | **0.0162** | **0.0445** | **0.9812** |
-
-The trained model artifact is saved at `models/qoe_model.joblib`.
-Evaluation logs are stored at `results/ml/model_results.csv` and detailed predictions at `results/ml/predictions.csv`.
-
----
-
-### 6. Dataset Limitations & Outage Breakdown
-
-An audit of the training and evaluation dataset reveals key operational characteristics and boundary limitations to maintain scientific rigor:
-
-- **Dataset Size and Scenarios**: The dataset contains **720 flow records across 120 unique scenarios** (6 flows per scenario on average, matching UE count distributions from 2 to 10).
-- **Outage Distribution (QoE = 0)**: **360 rows (50% of the dataset) have $\text{qoe\_proxy} = 0.0$** and are labelled as outages (`is_outage = 1`, `delivery_status = 'outage'`). In ns-3 FR2 (28 GHz) mmWave simulations, all 60 scenarios configured with 20 MHz bandwidth suffer total packet drop due to severe propagation loss and insufficient resource allocation, while all 60 scenarios with 50 MHz achieve delivery.
-- **Limited Bandwidth Support**: The current dataset tests **only two bandwidth values: 20 MHz and 50 MHz**.
-- **Fixed Transmit Power**: Total gNB transmit power is **fixed at 35 dBm** across all 120 scenarios in the current dataset.
-- **Proof-of-Concept Optimiser**: Because the training data contains only two bandwidth points (20 MHz outage vs. 50 MHz delivered) and a single transmit power level, the current Phase 2 optimiser operates as a **proof of concept over a limited configuration space**. It reliably learns the outage boundary rather than fine-grained continuous trade-offs.
-- **`lost_packets` Anomaly**: The `lost_packets` column is recorded as `0` throughout the dataset due to an ns-3 exporter quirk and **must not be trusted**. Model training and evaluation rely strictly on the validated `packet_loss` calculation derived from transmitted and received packets ($\text{packet\_loss} = 1.0 - \text{rx\_packets} / \text{tx\_packets}$).
-- **Underrepresented Intermediate QoE**: Non-outage QoE values cluster predominantly in the $[0.5, 0.7]$ range (266 rows), while intermediate degraded QoE values ($0 < \text{qoe\_proxy} \le 0.5$) account for only 49 rows (6.8% of the dataset). Model performance in degraded-but-not-outage conditions is therefore subject to higher uncertainty.
-- **Test-Set Metric Breakdown (Outage vs. Non-Outage)**:
-  On the holdout test set (24 scenarios, 130 flows):
-  - **Outage flows** ($N=68$, actual $\text{QoE}=0.0$):
-    - RandomForest: $\text{MAE} = 0.0000$, $\text{RMSE} = 0.0000$ (exact classification of outage state)
-    - HistGradientBoosting: $\text{MAE} = 0.0032$, $\text{RMSE} = 0.0051$
-    - LinearRegression: $\text{MAE} = 0.0378$, $\text{RMSE} = 0.0447$
-  - **Non-outage flows** ($N=62$, actual $\text{QoE} > 0.0$):
-    - RandomForest: $\text{MAE} = 0.0339$, $\text{RMSE} = 0.0645$, $R^2 = 0.7821$
-    - HistGradientBoosting: $\text{MAE} = 0.0351$, $\text{RMSE} = 0.0667$, $R^2 = 0.7670$
-    - LinearRegression: $\text{MAE} = 0.0742$, $\text{RMSE} = 0.1190$, $R^2 = 0.2577$
-
-  *Note*: The headline test $R^2 = 0.9812$ is partially aided by the separable 50% outage block; for non-outage operational flows, the best model achieves $R^2 \approx 0.78$ with an average prediction error under 0.034 on the $[0, 1]$ scale.
-
----
-
-## Phase 2: Offline ML-based Network Configuration Optimisation
-
-Phase 2 builds an **offline ML-based network configuration optimiser** using the verified Phase 1 surrogate model.
-
-### 1. What the Optimiser Does
-The optimiser solves the constrained network decision problem:
-$$\max_{\mathbf{c} \in \mathcal{C}} \widehat{\text{QoE}}(\mathbf{c}, \mathbf{x}) \quad \text{subject to } g_i(\mathbf{c}, \widehat{\text{QoE}}) \le 0$$
-where:
-- $\mathbf{x} = (\text{ue\_count}, \text{scenario\_size\_m}, \text{flow\_type}, \lambda)$ represents the operational network context.
-- $\mathbf{c} = (\text{bandwidth\_mhz}, \text{total\_tx\_power\_dbm})$ represents the candidate network configuration.
-- $\widehat{\text{QoE}}$ is evaluated rapidly via `models/qoe_model.joblib` (`qoe_proxy` / predicted QoE is a dimensionless score in the project's QoE scale; it is not measured in milliseconds).
-- $g_i$ represents configurable operational constraints (e.g., maximum transmit power, minimum acceptable QoE).
-
-The system executes an exhaustive grid search over all supported candidates, filters by feasibility, ranks candidates by predicted QoE, and compares the top selection against a requested baseline configuration.
-
----
-
-### 2. Supported Optimisation Variables vs Dataset Limitations
-
-| Parameter | Role | Supported Range / Values | Status in Current Optimiser |
-| :--- | :--- | :--- | :--- |
-| `bandwidth_mhz` | Decision Variable | $\{20.0, 50.0\}$ MHz | **Active**: Evaluates bandwidth allocation |
-| `total_tx_power_dbm` | Decision Variable | $\{35.0\}$ dBm | **Fixed**: Single-value support; true power optimisation requires additional ns-3 runs |
-| `ue_count` | Environment Context | $\{2, 4, 6, 8, 10\}$ | **Active**: Context parameter (no extrapolation) |
-| `scenario_size_m` | Environment Context | $\{3.0, 30.0, 100.0\}$ m | **Active**: Context parameter (no extrapolation) |
-| `flow_type` | Traffic Demand | `low_latency`, `voice_be` | **Active**: Context parameter |
-| `flow_lambda` | Traffic Demand | $\{5000, 10000, 20000, 40000\}$ pkts/s | **Active**: Context parameter |
-| `numerology` | PHY Numerology | $\mu=4$ (Band 1), $\mu=2$ (Band 2) | **Fixed**: Fixed by simulation architecture; not varied |
-
-> **Scientific Transparency Notice**: Because `total_tx_power_dbm` was constant at 35 dBm in the original dataset, the optimiser does not pretend to optimize power consumption. Power remains in the configuration schema for forward compatibility with future ns-3 datasets.
-
----
-
-### 3. Candidate Generation & Search Space Rules
-- Defined in `optimisation/search_space.py`.
-- Enforces strict support boundaries: candidates are never extrapolated outside observed data.
-- Input context is validated before generation. Any unobserved parameter (e.g., 50 UEs, 500m cell size) raises an explicit `ValueError`.
-
----
-
-### 4. Constraints Mechanism
-Constraints are modular and configurable:
-- `max_power_dbm`: Rejects candidates whose transmit power exceeds the threshold.
-- `min_predicted_qoe`: Rejects candidates failing to satisfy SLA quality targets.
-- `allowed_bandwidths`: Restricts search to a specific subset of bandwidths.
-
-If no constraints are passed, none are silently assumed. If no candidate satisfies the constraint, the status `NO_FEASIBLE_CANDIDATE_HIGHEST_QOE_RETURNED` is flagged.
-
----
-
-### 5. Running the Optimiser
-
-#### Basic Execution
-```bash
-python -m optimisation.run_optimisation \
-  --ue-count 4 \
-  --flow-type voice_be \
-  --lambda-val 10000 \
-  --bandwidth 20 \
-  --power 35
-```
-
-#### Execution with Constraints
-```bash
-python -m optimisation.run_optimisation \
-  --ue-count 10 \
-  --flow-type voice_be \
-  --lambda-val 40000 \
-  --bandwidth 20 \
-  --min-qoe 0.70
-```
-
-#### Running Automated Unit Tests
-```bash
-python -m unittest tests/test_optimisation.py -v
-```
-
-All optimization decisions, candidates, and constraint statuses are automatically logged to `results/optimisation/optimisation_results.csv`.
-
----
-
-### 6. ns-3 Verification Status
-All reported improvements are strictly labeled:
-> **"Predicted improvement — pending ns-3 verification"**
-
-The offline optimiser uses the ML surrogate to select promising configurations. **Phase 3** introduces the closed-loop ns-3 runner to simulate selected configurations in the 3GPP NR environment and verify actual network KPIs against ML predictions.
-
----
-
-## Phase 3: Closed-Loop ns-3 Simulation Verification
-
-Phase 3 implements an **offline, simulation-based closed-loop verification workflow** (NOT live network control). It automates the transition from ML recommendation to physical 5G simulation, actual metric parsing, and error quantification.
-
-### 1. Workflow Architecture
-```
-Network Context (UEs, Area, Traffic Demand)
-           ↓
-Phase 2 Optimiser (selects candidate & predicts QoE)
-           ↓
-ns-3 Runner (launches isolated 5G simulation via subprocess)
-           ↓
-Result Parser (extracts throughput, delay, jitter, packet loss)
-           ↓
-QoE Calculation (calculates measured QoE using exact formula)
-           ↓
-Verification & Error Analysis (|QoE_pred - QoE_meas|, gain vs baseline)
-           ↓
-Persistent Logging (results/phase3/verification_results.csv)
-```
-
-### 2. Execution Isolation & Artifact Preservation
-- Each simulation run executes with `cwd = results/phase3/runs/<run_id>/` and an absolute `--outputDir`.
-- Generates per-run simulation logs (`stdout.log`, `stderr.log`, `run_config.json`, `sim_summary.txt`, and per-run `qoe_dataset.csv`).
-- The original dataset (`data/raw/qoe_dataset.csv`), the `ns-3.48/` repository, and Phase 1/2 outputs are **never modified or overwritten**.
-
-### 3. Running Closed-Loop Experiments
-
-#### Run Closed-Loop Verification
-```bash
-python -m simulation.closed_loop \
-  --ue-count 2 \
-  --flow-type voice_be \
-  --lambda-val 5000 \
-  --baseline-bandwidth 20
-```
-
-#### Run All Unit Tests Across Phases
-```bash
-python -m unittest discover -s tests -p "test_*.py" -v
-```
-
-### 4. Interpreting Prediction Error
-- **Absolute Error**: $|\widehat{\text{QoE}} - \text{QoE}_{\text{meas}}|$, measuring deviation on the dimensionless $[0, 1]$ QoE scale.
-- **Relative Error**: $\frac{|\widehat{\text{QoE}} - \text{QoE}_{\text{meas}}|}{\text{QoE}_{\text{meas}}}$, evaluated only when $\text{QoE}_{\text{meas}} > 0$.
-- **Measured Improvement**: $\text{QoE}_{\text{meas, opt}} - \text{QoE}_{\text{meas, base}}$, reporting verified gain against the physical baseline run.
-
----
-
-## Phase 4: Interactive Dashboard
-
-Phase 4 adds a polished, interactive **Streamlit dashboard** that integrates the Phase 1–3 components into a single research UI.
-
-### Installation
-
-All dependencies (including Streamlit and Plotly) are listed in `requirements.txt`:
+From the project root in WSL/Linux, with the Python dependencies installed:
 
 ```bash
-# From the project root, activate the venv first:
-source .venv/bin/activate
-pip install -r requirements.txt
+python3 -m streamlit run app.py
 ```
 
-### Starting the Dashboard
+If using the copied environment whose package directory is populated but whose Python launcher is unavailable, use:
 
 ```bash
-streamlit run app.py
+PYTHONPATH=.venv/lib/python3.12/site-packages python3 -m streamlit run app.py
 ```
 
-The dashboard opens at `http://localhost:8501` by default.
+Open the local URL printed by Streamlit. Select **Run simulation**, choose the UE mix and controller mode, set the target and service floors, then start a session. Select **Automatic** only when you want eligible actions to be applied without approval. The dashboard distinguishes measured telemetry, forecast values, model estimates, and verified simulator outcomes.
 
-### Pages
+The dashboard requires the live ns-3 executable at `ns-3.48/build-live-release/scratch/ns3.48-qoe-live-control`. If it is missing, rebuild it using the commands in [`docs/live-simulation.md`](docs/live-simulation.md). The simulator uses ns-3's real-time scheduler on a best-effort basis; a heavy scenario or a slow host can make telemetry stale. A structural restart creates a new process segment and resets that segment's simulation clock while retaining the session history.
 
-| Page | Description |
-|:---|:---|
-| **📊 Overview** | Dataset statistics, best model KPIs, Phase-3 run summary, QoE distribution chart |
-| **🔍 Simulation Explorer** | Filter and browse all 720 flow records; tabs for QoE histogram, UE-count box plot, throughput vs delay scatter |
-| **🤖 QoE Predictor** | Select a network configuration; ML model predicts QoE (gauge chart) with model performance summary |
-| **⚙️ Network Optimiser** | Enter a network context; optimiser searches the supported bandwidth space and ranks candidates by predicted QoE |
-| **🔁 Closed-Loop Verification** | View all Phase-3 verification records; launch new ns-3 simulations on button click and compare predicted vs measured QoE |
+## Models and data
 
-### Known Limitations
+- The **live trend forecast** is calculated from recent measurements; it is not a trained ML model.
+- A separate guarded ML advisor compares selected offered-rate candidates for the supported legacy traffic contexts. It was trained on generated ns-3 KPI data and is not used as a general time-series forecaster. Unsupported contexts, including NGMN gaming/video, multi-cell scenarios, and unrepresented configurations, are rejected. See [`models/live_hybrid_ns3_20261030/README.md`](models/live_hybrid_ns3_20261030/README.md).
+- The external 5G campus dataset is retained as a separate benchmark. It is not interchangeable with this ns-3 scenario and has not replaced the active production model. See [`docs/external-campus-dataset-migration.md`](docs/external-campus-dataset-migration.md).
+- Run `python3 scripts/evaluate_live_forecast.py` to produce a session-grouped forecast evaluation in `results/live_forecast_calibration/`. The report requires more independent Monitor sessions before it can support a reliability claim.
 
-- **Research dashboard only** — not a live network controller.
-- `total_tx_power_dbm` is fixed at **35 dBm** (the only value in the training dataset). Power optimisation is not possible without additional simulation data.
-- **20 MHz bandwidth at 28 GHz FR2** produces 100 % outage in the ns-3 simulator. The model has learned this pattern; selecting 20 MHz will produce a near-zero QoE prediction.
-- `qoe_proxy` / predicted QoE is a **dimensionless score** in [0, 1]; it is **not** measured in milliseconds.
-- Predicted improvement is always labelled *"pending ns-3 verification"* until confirmed by a real simulation run on the Closed-Loop Verification page.
-- Simulations are **never launched automatically**; they require an explicit button click and a confirmation checkbox.
+## Dashboard sections
 
-### Test Coverage (Phase 4)
+- **Run simulation:** live session control, per-UE topology and metrics, forecast, safety-floor assessment, action feed, history, and diagnostics.
+- **Overview, Experiments, Analytics:** saved simulation summaries, comparisons, and trends.
+- **Tools:** offline dataset, model, and benchmark utilities. These are separate from live ns-3 measurements.
 
-New tests are in `tests/test_dashboard.py` (28 tests covering data loading, chart generation, ML integration, optimiser API, and Phase-3 display). The full test suite now runs **45 tests**:
+## Reproducibility and records
 
-```bash
-python -m unittest discover -s tests -p "test_*.py" -v
-# Expected: Ran 45 tests in ~3s  OK
-```
+Session data are retained at `results/live_sessions/<session-id>/`. Each session includes metadata and events; each ns-3 process segment stores its telemetry, simulator output, run configuration, and control acknowledgements. Do not interpret a proposed or model-estimated gain as an observed improvement until later ns-3 measurements verify it.
+
+Useful references:
+
+- [`docs/live-simulation.md`](docs/live-simulation.md) — build, launch, QoE formula, controller actions, and live-session behavior.
+- [`docs/predictive-live-control.md`](docs/predictive-live-control.md) — separate scheduled-demand experiment and its limits.
+- [`docs/data-and-measurement-audit.md`](docs/data-and-measurement-audit.md) — audit of the original generated dataset and measurement semantics.
+- [`docs/external-campus-dataset-migration.md`](docs/external-campus-dataset-migration.md) — external dataset scope, provenance, licensing, and compatibility decision.
+
+## Git safety
+
+This project may contain local simulation records, datasets, and model artifacts. Review `git status` before staging; stage only the files intended for a commit. Do not commit raw data, backups, or generated session outputs unless they are deliberately part of the research deliverable.

@@ -1,0 +1,25 @@
+{
+  "title": "5G Campus Network QoS Dataset for Open-Source gNB Implementations",
+  "source_url": "https://zenodo.org/records/13754300",
+  "doi": "10.5281/zenodo.13754300",
+  "version": "v1",
+  "retrieved": "2026-10-29",
+  "license": "CC-BY-4.0",
+  "citation": "Simon Raffeck, Sebastian Grøsvik, Stanislav Lange, Tobias Hoßfeld, Thomas Zinner, Stefan Geißler. 5G Campus Network QoS Dataset for Open-Source gNB Implementations. Zenodo (2024). https://doi.org/10.5281/zenodo.13754300",
+  "associated_paper": "Raffeck et al., Parameterizing 5G New Radio: A Comparative Measurement Study on Throughput and Delay, CNSM 2024. DOI: 10.23919/CNSM62983.2024.10814615",
+  "selected_files": {
+    "ntnu_tput_all_Throughput.csv": {
+      "rows": 142,
+      "bytes": 26971,
+      "zenodo_md5": "9e30456494de6d31e017fb00fef44478",
+      "sha256": "c4968908d33aadcf8d1b5b8030db679309dbd11b745c1933bd36d56ed55f715f"
+    },
+    "wue_tput_all_Throughput.csv": {
+      "rows": 160,
+      "bytes": 29260,
+      "zenodo_md5": "b62e0f47b796e73d3f8ae44eca40937f",
+      "sha256": "dfa1f5bbff178ddc44407453dac146b2d6ab18332a214d61015c9a9b45a4f15b"
+    }
+  },
+  "excluded_files": "Four packet trace files (multi-gigabyte total) were not downloaded; they are not used by the run-level throughput benchmark."
+}

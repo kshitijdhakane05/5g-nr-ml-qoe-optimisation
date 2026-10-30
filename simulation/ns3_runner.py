@@ -18,11 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Default path to pre-built compiled ns-3 scratch binary
+# Default path to the self-contained build produced from this project copy.
 DEFAULT_NS3_BINARY = (
     Path(__file__).resolve().parent.parent
     / "ns-3.48"
-    / "build"
+    / "build-copyfix"
     / "scratch"
     / "ns3.48-qoe-dataset-default"
 )

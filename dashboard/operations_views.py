@@ -52,7 +52,7 @@ def valid_measurements(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def session_table(records: list[dict[str, Any]]) -> pd.DataFrame:
-    """Build a readable per-session table from authoritative run records."""
+    """Build a concise session index; selected-session pages expose full records."""
     rows = []
     for record in records:
         if record.get("error"):
@@ -65,15 +65,20 @@ def session_table(records: list[dict[str, Any]]) -> pd.DataFrame:
         latest = valid[-1] if valid else None
         current = (latest or {}).get("config") or state.get("current_config") or {}
         completed_duration = sum(float(event.get("duration_seconds") or 0) for event in events)
+        started = state.get("created_utc", "—")
+        try:
+            started = pd.Timestamp(started).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            pass
         rows.append({
             "Session": record["id"],
-            "Started (UTC)": state.get("created_utc", "—"),
+            "Started": started,
             "Status": session_status_label({
                 **state, "stop_requested": (folder / "STOP_REQUESTED").exists(),
             }),
             "Mode": state.get("controller_mode", "—"),
             "Scenario": state.get("preset_name", "Custom"),
-            "Normal attempts": f"{counts['normal_attempted']}/{state.get('max_epochs', 0)}",
+            "Attempts": f"{counts['normal_attempted']}/{state.get('max_epochs', 0)}",
             "Extra attempts": f"{counts['experimental_attempted']}/"
             f"{state.get('max_additional_exploratory_epochs', 0) if state.get('run_remaining_experimental_candidates') else 0}",
             "Valid runs": len(valid),
@@ -91,7 +96,11 @@ def session_table(records: list[dict[str, Any]]) -> pd.DataFrame:
             "Duration (s)": round(completed_duration, 2),
             "Termination": state.get("final_outcome", "—"),
         })
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    summary_columns = [
+        "Session", "Started", "Status", "Attempts", "Best score",
+    ]
+    return table[[column for column in summary_columns if column in table.columns]]
 
 
 def topology_figure(
@@ -131,7 +140,7 @@ def topology_figure(
             x=edge_x, y=edge_y, mode="lines", name="Measured UE association",
             line={"color": "#50647e", "width": 1.5}, hoverinfo="skip",
         ))
-    for even, name, color in ((True, "Low-latency UDP workload", "#42d3e8"), (False, "Voice QoS UDP workload", "#5f91ff")):
+    for even, name, color in ((True, "Low-latency UDP workload", "#087f8c"), (False, "Voice QoS UDP workload", "#4267b2")):
         positions = [index for index in range(ue_count) if (index % 2 == 0) == even]
         ids = [index + 1 for index in positions]
         customdata = []
@@ -149,7 +158,7 @@ def topology_figure(
                 ),
                 item.get("serving_cell_id"),
             ])
-            marker_colors.append("#ea6f78" if item.get("is_outage") else color)
+            marker_colors.append("#c24450" if item.get("is_outage") else color)
             marker_sizes.append(25 if highlighted_ue == ue_id else 20)
         figure.add_trace(go.Scatter(
             x=[ue_x[index] for index in positions], y=[ue_y[index] for index in positions],
@@ -172,7 +181,7 @@ def topology_figure(
         text=[f"Cell {cell_id}" for cell_id in cell_ids], textposition="bottom center",
         customdata=[[cell_id, config.get("bandwidth_band1_mhz", "—"),
                      config.get("bandwidth_band2_mhz", "—")] for cell_id in cell_ids],
-        marker={"size": 28, "symbol": "diamond", "color": "#43c99a", "line": {"color": "#e8f1fb", "width": 1}},
+        marker={"size": 28, "symbol": "diamond", "color": "#23835b", "line": {"color": "#ffffff", "width": 1}},
         hovertemplate=("Cell %{customdata[0]} (gNB)<br>Band 1: %{customdata[1]} MHz"
                        "<br>Band 2: %{customdata[2]} MHz<extra></extra>"),
     ))
@@ -188,7 +197,7 @@ def topology_figure(
         figure.add_annotation(
             text=f"Session QoE target reference: {session_target:.3f} (not a per-UE SLA)",
             xref="paper", yref="paper", x=0.5, y=1.14, showarrow=False,
-            font={"size": 11, "color": "#a7b6c9"},
+            font={"size": 11, "color": "#52657d"},
         )
     return style_figure(figure)
 
@@ -258,12 +267,12 @@ def kpi_trend_figure(events: list[dict[str, Any]], metric: str) -> go.Figure:
 
 
 def render_overview(st_module: Any) -> None:
-    """Summarize the newest saved ns-3 session and recent verified activity."""
-    page_header("Network overview", "A quick view of the latest ns-3 simulation and recent measured results.")
+    """Give recent ns-3 evidence a clear, quality-first summary."""
+    page_header("Network overview", "Latest validated simulation evidence and saved session history.")
     records = load_live_records()
     if not records:
-        st_module.info("No live simulator sessions are recorded yet. Open Live Simulator to configure and start a run.")
-        st_module.markdown("**Quick access:** use the left navigation to open **Live Simulator**, **Experiments**, or **Analytics**.")
+        st_module.info("No simulator sessions are saved yet. Open Run simulation to configure and start an ns-3 run.")
+        st_module.caption("This overview will populate from persisted session records after a run is started.")
         return
     record = records[0]
     if record.get("error"):
@@ -278,27 +287,48 @@ def render_overview(st_module: Any) -> None:
     metrics = latest.get("metrics", {}) if latest else {}
     status = session_status_label({**state, "stop_requested": (folder / "STOP_REQUESTED").exists()})
     display_state = {**state, "stop_requested": (folder / "STOP_REQUESTED").exists()}
-    st.caption(f"Latest session `{record['id']}` · {session_status_explanation(display_state)}")
-    cols = st.columns(5)
-    cols[0].metric("Simulation status", status)
-    cols[1].metric("Measured quality score", f"{float(latest['measured_qoe_proxy']):.4f}" if latest else "—")
-    cols[2].metric("Throughput", f"{metrics['mean_throughput_mbps']:.2f} Mbps" if latest else "—")
-    cols[3].metric("Latency", f"{metrics['mean_delay_ms']:.2f} ms" if latest else "—")
-    cols[4].metric("Packet loss", f"{float(metrics['mean_packet_loss']) * 100:.2f}%" if latest else "—")
-    st.caption(
-        f"Configuration: {config.get('config_id', '—')} · {config.get('ue_count', '—')} UEs · "
-        f"{config.get('gnb_count', 1)} gNB cells · "
-        f"Band 1 {config.get('bandwidth_band1_mhz', '—')} MHz / Band 2 {config.get('bandwidth_band2_mhz', '—')} MHz · "
-        f"requested power {config.get('total_tx_power_dbm', '—')} dBm. "
-        "The quality score is a simulated KPI proxy, not a subjective user rating."
-    )
-    st.subheader("Recent simulator sessions")
-    st.dataframe(session_table(records[:8]), hide_index=True, width="stretch")
-    if valid:
-        st.subheader("Latest session quality by run")
-        st.plotly_chart(build_qoe_figure(events, float(state.get("target_qoe", 0.8))), width="stretch", key="overview_recent_qoe")
+    st.caption(f"Latest session · `{record['id']}` · {session_status_explanation(display_state)}")
+    st.subheader("Latest validated run")
+    if latest:
+        def measured(value: Any, unit: str, scale: float = 1.0) -> str:
+            return f"{float(value) * scale:.2f} {unit}" if value is not None else "Not available"
+
+        score_col, context_col = st.columns([1, 2], gap="large")
+        with score_col:
+            st.metric("Measured QoE proxy", f"{float(latest['measured_qoe_proxy']):.4f}")
+            st.caption("Dimensionless simulated score · 0–1 · not a subjective user rating")
+            st.caption(f"Session status: {status}")
+        with context_col:
+            with st.container(border=True):
+                st.markdown("**Run configuration**")
+                st.markdown(
+                    f"**{config.get('ue_count', '—')} UEs** · **{config.get('gnb_count', 1)} gNB cells**"
+                )
+                st.caption(
+                    f"Band 1 {config.get('bandwidth_band1_mhz', 'Not available')} MHz · "
+                    f"Band 2 {config.get('bandwidth_band2_mhz', 'Not available')} MHz · "
+                    f"Requested total power {config.get('total_tx_power_dbm', 'Not available')} dBm"
+                )
+        st.markdown("**Measured network KPIs**")
+        kpi_cols = st.columns(4)
+        kpi_cols[0].metric("Throughput", measured(metrics.get("mean_throughput_mbps"), "Mbps"))
+        kpi_cols[1].metric("One-way latency", measured(metrics.get("mean_delay_ms"), "ms"))
+        kpi_cols[2].metric("Jitter", measured(metrics.get("mean_jitter_ms"), "ms"))
+        kpi_cols[3].metric("Packet loss", measured(metrics.get("mean_packet_loss"), "%", 100))
     else:
-        st.info("This session has no validated measurements yet. Failed or invalid runs are not shown as measured zero values.")
+        with st.container(border=True):
+            st.metric("Measured QoE proxy", "Not available")
+            st.caption("This session has no validated completed measurement. Failed or invalid runs are not displayed as measured zero values.")
+            st.caption(f"Session status: {status} · configuration ID: {config.get('config_id', '—')}")
+
+    if valid:
+        st.subheader("QoE proxy across simulation runs")
+        st.caption("Each point is a validated run; the dashed reference is this session’s configured target.")
+        st.plotly_chart(build_qoe_figure(events, float(state.get("target_qoe", 0.8))), width="stretch", key="overview_recent_qoe")
+
+    st.subheader("Recent sessions")
+    with st.container(border=True):
+        st.dataframe(session_table(records[:8]), hide_index=True, width="stretch")
 
 
 def render_experiments(st_module: Any) -> None:
@@ -310,7 +340,10 @@ def render_experiments(st_module: Any) -> None:
         return
     summary = session_table(records)
     status_values = sorted(summary["Status"].dropna().unique().tolist()) if "Status" in summary else []
-    selected_statuses = st_module.multiselect("Filter by status", status_values, default=status_values, key="experiments_status_filter")
+    with st_module.expander("Filter sessions", expanded=False):
+        selected_statuses = st_module.multiselect(
+            "Status", status_values, default=status_values, key="experiments_status_filter",
+        )
     def record_status(record: dict[str, Any]) -> str:
         if record.get("error"):
             return "Unreadable"
@@ -322,7 +355,18 @@ def render_experiments(st_module: Any) -> None:
         record for record in records
         if record_status(record) in selected_statuses
     ]
-    st_module.dataframe(session_table(filtered_records), hide_index=True, width="stretch")
+    with st_module.container(border=True):
+        st_module.caption("Start times are UTC. Best score is the measured QoE proxy (0–1).")
+        st_module.dataframe(
+            session_table(filtered_records), hide_index=True, width="stretch",
+            column_config={
+                "Session": st_module.column_config.TextColumn(width="medium"),
+                "Started": st_module.column_config.TextColumn(width="small"),
+                "Status": st_module.column_config.TextColumn(width="large"),
+                "Attempts": st_module.column_config.TextColumn(width="small"),
+                "Best score": st_module.column_config.NumberColumn(format="%.4f", width="small"),
+            },
+        )
     usable = [record for record in filtered_records if not record.get("error")]
     if not usable:
         st_module.info("No readable sessions match the selected status filter.")
@@ -331,8 +375,20 @@ def render_experiments(st_module: Any) -> None:
     selected_label = st_module.selectbox("Inspect session", list(label_to_id), key="experiments_detail_session")
     selected = next(record for record in usable if record["id"] == label_to_id[selected_label])
     state, events, folder = selected["state"], selected["events"], selected["path"]
-    st_module.markdown(f"**Session:** `{selected['id']}` · **Status:** {record_status(selected)}")
+    counts = session_run_counts(folder, events, state)
+    valid = valid_measurements(events)
+    st_module.subheader("Selected session")
+    st_module.markdown(f"`{selected['id']}` · **{record_status(selected)}**")
     st_module.caption(state.get("final_outcome") or state.get("phase") or "Session is in progress.")
+    summary_cols = st_module.columns(5)
+    extra_limit = (int(state.get("max_additional_exploratory_epochs", 0))
+                   if state.get("run_remaining_experimental_candidates") else 0)
+    summary_cols[0].metric("Validated runs", len(valid))
+    summary_cols[1].metric("Normal attempts", f"{counts['normal_attempted']} / {state.get('max_epochs', 0)}")
+    summary_cols[2].metric("Extra attempts", f"{counts['experimental_attempted']} / {extra_limit}")
+    best_score = max((float(event["measured_qoe_proxy"]) for event in valid), default=None)
+    summary_cols[3].metric("Best measured QoE proxy", f"{best_score:.4f}" if best_score is not None else "Not available")
+    summary_cols[4].metric("Controller mode", state.get("controller_mode", "Not recorded"))
     detail_tab, chart_tab, files_tab = st_module.tabs(["Configuration and measurements", "Run timeline", "Saved files"])
     with detail_tab:
         st_module.json({

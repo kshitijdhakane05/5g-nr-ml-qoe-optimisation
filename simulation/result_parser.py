@@ -23,9 +23,29 @@ SIMULATION_CSV_COLUMNS = [
 UE_MEASUREMENT_COLUMNS = [
     "ue_id", "traffic_class", "application_profile", "flow_id", "tx_packets", "rx_packets",
     "throughput_mbps", "delay_ms", "jitter_ms", "packet_loss_fraction", "qoe_proxy",
-    "serving_cell_id",
+    "serving_cell_id", "qoe_formula_version",
 ]
 LEGACY_UE_MEASUREMENT_COLUMNS = UE_MEASUREMENT_COLUMNS[:-1]
+PREVIOUS_UE_MEASUREMENT_COLUMNS = [c for c in UE_MEASUREMENT_COLUMNS if c not in {"serving_cell_id", "qoe_formula_version"}]
+LEGACY_VERSIONED_UE_COLUMNS = [c for c in UE_MEASUREMENT_COLUMNS if c != "qoe_formula_version"]
+
+# Project service profiles. Delay/error targets are analogous to the 5QI 3
+# (interactive low-latency) and 5QI 1 (conversational voice) examples in 3GPP
+# TS 23.501; the simulator configures the corresponding NR QoS-flow enums for
+# gaming/video and does not claim that every external 5QI behavior is modeled.
+# Jitter limits and voice/gaming floors are project policy. The low-latency
+# throughput follows its default offered load (100 B × 2,500 pps); the video
+# throughput reference follows the NGMN generator's documented 64 kbps default.
+QOE_FORMULA_VERSION = "service_v2"
+QOE_SERVICE_PROFILES = {
+    "low_latency": {"throughput_mbps": 2.0, "delay_ms": 50.0, "jitter_ms": 5.0, "loss_fraction": 0.001},
+    "voice_qos": {"throughput_mbps": 0.1, "delay_ms": 100.0, "jitter_ms": 30.0, "loss_fraction": 0.01},
+    # The gaming reference is a project floor for the NGMN quasi-periodic
+    # packet model. Video's 64 kbps reference follows the model's documented
+    # default source rate; it is not a player-buffer or resolution QoE model.
+    "gaming": {"throughput_mbps": 0.05, "delay_ms": 50.0, "jitter_ms": 10.0, "loss_fraction": 0.001},
+    "video_streaming": {"throughput_mbps": 0.064, "delay_ms": 300.0, "jitter_ms": 50.0, "loss_fraction": 0.000001},
+}
 
 
 def calculate_packet_loss(tx_packets: int, rx_packets: int) -> float:
@@ -36,14 +56,35 @@ def calculate_packet_loss(tx_packets: int, rx_packets: int) -> float:
     return max(0.0, min(1.0, float(loss)))
 
 
+def calculate_qoe_components(
+    throughput_mbps: float, delay_ms: float, jitter_ms: float, packet_loss: float,
+    traffic_class: str, rx_packets: int = 1,
+) -> dict[str, float]:
+    """Return service_v2 satisfaction components before their QoE weights."""
+    if traffic_class not in QOE_SERVICE_PROFILES:
+        raise ValueError(f"Unknown traffic class for {QOE_FORMULA_VERSION}: {traffic_class!r}")
+    if rx_packets <= 0:
+        return {"throughput": 0.0, "delay": 0.0, "jitter": 0.0, "packet_loss": 0.0}
+    profile = QOE_SERVICE_PROFILES[traffic_class]
+    loss = max(0.0, min(1.0, float(packet_loss)))
+    return {
+        "throughput": min(max(0.0, float(throughput_mbps)) / profile["throughput_mbps"], 1.0),
+        "delay": max(0.0, 1.0 - max(0.0, float(delay_ms)) / profile["delay_ms"]),
+        "jitter": max(0.0, 1.0 - max(0.0, float(jitter_ms)) / profile["jitter_ms"]),
+        "packet_loss": max(0.0, 1.0 - loss / profile["loss_fraction"]),
+    }
+
+
 def calculate_qoe_proxy(
     throughput_mbps: float,
     delay_ms: float,
     jitter_ms: float,
     packet_loss: float,
     rx_packets: int = 1,
+    traffic_class: str | None = None,
+    formula_version: str = "legacy_v1",
 ) -> float:
-    """Calculate QoE proxy according to the verified ns-3 formula.
+    """Calculate the explicitly versioned QoE proxy.
     
     Formula from ns-3.48/scratch/qoe-dataset.cc:
         qoeProxy = 0.40 * min(throughputMbps / 50.0, 1.0)
@@ -55,6 +96,13 @@ def calculate_qoe_proxy(
     if rx_packets <= 0:
         return 0.0
     clamped_loss = max(0.0, min(1.0, float(packet_loss)))
+    if formula_version == QOE_FORMULA_VERSION:
+        components = calculate_qoe_components(throughput_mbps, delay_ms, jitter_ms,
+                                              clamped_loss, traffic_class or "", rx_packets)
+        return (0.40 * components["throughput"] + 0.25 * components["delay"]
+                + 0.20 * components["jitter"] + 0.15 * components["packet_loss"])
+    if formula_version != "legacy_v1":
+        raise ValueError(f"Unsupported QoE formula version: {formula_version}")
     qoe = (
         0.40 * min(max(0.0, float(throughput_mbps)) / 50.0, 1.0)
         + 0.25 * math.exp(-max(0.0, float(delay_ms)) / 50.0)
@@ -77,9 +125,10 @@ def parse_ue_measurements(
     path = Path(csv_path)
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames not in (UE_MEASUREMENT_COLUMNS, LEGACY_UE_MEASUREMENT_COLUMNS):
+        if reader.fieldnames not in (UE_MEASUREMENT_COLUMNS, LEGACY_VERSIONED_UE_COLUMNS,
+                                     LEGACY_UE_MEASUREMENT_COLUMNS, PREVIOUS_UE_MEASUREMENT_COLUMNS):
             raise ValueError(f"Per-UE CSV schema mismatch: {reader.fieldnames!r}")
-        has_serving_cell = reader.fieldnames == UE_MEASUREMENT_COLUMNS
+        has_serving_cell = "serving_cell_id" in reader.fieldnames
         rows = list(reader)
     if expected_ue_count is not None and len(rows) != int(expected_ue_count):
         raise ValueError(f"Expected {expected_ue_count} per-UE rows, found {len(rows)}")
@@ -100,9 +149,10 @@ def parse_ue_measurements(
             traffic_class = str(row["traffic_class"])
             application = str(row["application_profile"])
             serving_cell_id = int(row["serving_cell_id"]) if has_serving_cell else None
+            formula_version = str(row.get("qoe_formula_version") or "legacy_v1")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Malformed per-UE measurement row: {exc}") from exc
-        if not row["application_profile"] or traffic_class not in {"low_latency", "voice_qos"}:
+        if not row["application_profile"] or traffic_class not in QOE_SERVICE_PROFILES:
             raise ValueError(f"Unknown per-UE traffic profile for UE {ue_id}")
         if ue_id < 1 or flow_id < 1 or ue_id in seen_ues or flow_id in seen_flows:
             raise ValueError(f"Duplicate or invalid UE/flow identity: UE {ue_id}, flow {flow_id}")
@@ -118,7 +168,8 @@ def parse_ue_measurements(
         if min(throughput, delay, jitter) < 0 or not 0 <= packet_loss <= 1 or not 0 <= recorded_qoe <= 1:
             raise ValueError(f"Out-of-range per-UE measurement for UE {ue_id}")
         expected_loss = calculate_packet_loss(tx, rx)
-        expected_qoe = calculate_qoe_proxy(throughput, delay, jitter, expected_loss, rx_packets=rx)
+        expected_qoe = calculate_qoe_proxy(throughput, delay, jitter, expected_loss, rx_packets=rx,
+                                           traffic_class=traffic_class, formula_version=formula_version)
         if not math.isclose(packet_loss, expected_loss, abs_tol=2e-5):
             raise ValueError(f"Packet-loss recomputation mismatch for UE {ue_id}")
         if not math.isclose(recorded_qoe, expected_qoe, abs_tol=2e-5):
@@ -130,6 +181,7 @@ def parse_ue_measurements(
             "flow_id": flow_id, "tx_packets": tx, "rx_packets": rx,
             "throughput_mbps": throughput, "delay_ms": delay, "jitter_ms": jitter,
             "packet_loss_fraction": packet_loss, "qoe_proxy": recorded_qoe,
+            "qoe_formula_version": formula_version,
             "serving_cell_id": serving_cell_id,
             "is_outage": tx > 0 and rx == 0,
         })

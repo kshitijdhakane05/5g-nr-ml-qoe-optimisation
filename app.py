@@ -1,22 +1,9 @@
-"""
-app.py  —  Phase 4: 5G NR QoE Optimisation Dashboard
-======================================================
-Entry point: `streamlit run app.py`
+"""Streamlit dashboard for persistent real-time ns-3 QoE control and offline analysis.
 
-Pages
------
-  1. Live Simulator
-  2. Overview
-  3. Experiments
-  4. Analytics
-  5. More tools (existing supporting pages)
-
-IMPORTANT
----------
-* This dashboard is a research/demo tool — NOT a live network controller.
-* Simulations are launched only on explicit button clicks, never on page load.
-* All predictions are ML estimates; verification requires ns-3 runs.
-* The raw dataset (`data/raw/qoe_dataset.csv`) is never written to.
+Entry point: ``streamlit run app.py``. The primary Run simulation page starts
+one supervised real-time ns-3 session, distinguishes forecasts from measurements,
+and exposes only verified in-process controls. Supporting pages retain historical
+and offline dataset analyses.
 """
 
 from __future__ import annotations
@@ -83,27 +70,40 @@ render_dashboard_theme()
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 PAGES = [
-    "🛰️ Live Simulator",
-    "📊 Overview",
-    "🧪 Experiments",
-    "📈 Analytics",
-    "🧰 More tools",
+    "Run simulation",
+    "Overview",
+    "Experiments",
+    "Analytics",
+    "Tools",
 ]
+PAGE_SLUGS = {
+    "run": PAGES[0],
+    "overview": PAGES[1],
+    "experiments": PAGES[2],
+    "analytics": PAGES[3],
+    "tools": PAGES[4],
+}
 LEGACY_PAGES = [
     "🔍 Simulation Explorer",
-    "🤖 QoE Predictor",
-    "⚙️ Network Optimiser",
-    "🔁 Closed-Loop Verification",
+    "🤖 QoE Predictor (offline dataset)",
+    "⚙️ Network Optimiser (offline analysis)",
+    "🔁 Closed-Loop Verification (single run)",
     "🧪 Experimental KPI Results (offline)",
+    "🧠 Live Hybrid Model & Dataset Provenance",
+    "🌐 External 5G Campus Dataset Benchmark",
 ]
 
 with st.sidebar:
     st.title(f"📡 {PROJECT_DISPLAY_NAME}")
     st.caption("ns-3 network operations")
     st.divider()
-    page = st.radio("Main navigation", PAGES, label_visibility="collapsed", key="relay_main_navigation")
+    initial_view = PAGE_SLUGS.get(st.query_params.get("view", ""), PAGES[0])
+    page = st.radio(
+        "Workspace", PAGES, index=PAGES.index(initial_view),
+        label_visibility="collapsed", key="relay_main_navigation",
+    )
     if page == PAGES[4]:
-        page = st.selectbox("Supporting tools", LEGACY_PAGES, key="relay_supporting_tool")
+        page = st.selectbox("Additional tools", LEGACY_PAGES, key="relay_supporting_tool")
     st.divider()
     with st.expander("Project scope"):
         research_disclaimer()
@@ -113,9 +113,9 @@ with st.sidebar:
 # PRIMARY ROUTES
 # ===========================================================================
 if page == PAGES[0]:
-    from dashboard.live_ns3_control import render_live_ns3_control
+    from dashboard.live_simulation import render_live_simulation
 
-    render_live_ns3_control(st)
+    render_live_simulation(st)
 elif page == PAGES[1]:
     render_overview(st)
 elif page == PAGES[2]:
@@ -239,7 +239,8 @@ elif page == LEGACY_PAGES[0]:
 # PAGE 3 — QoE PREDICTOR
 # ===========================================================================
 elif page == LEGACY_PAGES[1]:
-    st.title("🤖 QoE Predictor")
+    st.title("🤖 QoE Predictor · Offline dataset")
+    st.caption("Dataset-based prediction view; not used by the live controller and not a measured ns-3 result.")
     st.markdown(
         "Enter a network configuration below and click **Predict** to get "
         "an ML-estimated QoE score.  "
@@ -356,7 +357,8 @@ elif page == LEGACY_PAGES[1]:
 # PAGE 4 — NETWORK OPTIMISER
 # ===========================================================================
 elif page == LEGACY_PAGES[2]:
-    st.title("⚙️ Network Optimiser")
+    st.title("⚙️ Network Optimiser · Offline analysis")
+    st.caption("Historical candidate analysis only. Live interventions are controlled from Run simulation.")
     st.markdown(
         "Given a network context, the optimiser searches the supported "
         "configuration space and selects the configuration with the highest "
@@ -518,7 +520,7 @@ elif page == LEGACY_PAGES[2]:
 # PAGE 5 — CLOSED-LOOP VERIFICATION
 # ===========================================================================
 elif page == LEGACY_PAGES[3]:
-    st.title("🔁 Closed-Loop Verification")
+    st.title("🔁 Closed-Loop Verification · Single run")
     st.markdown(
         "Run the Phase 3 pipeline: Optimiser → ns-3 simulation → QoE comparison.  "
         "Simulations are launched **only on button click**, not automatically."
@@ -820,4 +822,12 @@ elif page == LEGACY_PAGES[4]:
     from dashboard.experimental_kpi_results import render_experimental_kpi_results
 
     render_experimental_kpi_results(st)
+elif page == LEGACY_PAGES[5]:
+    from dashboard.external_dataset import render_live_model_provenance
+
+    render_live_model_provenance(st)
+elif page == LEGACY_PAGES[6]:
+    from dashboard.external_dataset import render_external_dataset_page
+
+    render_external_dataset_page(st)
 

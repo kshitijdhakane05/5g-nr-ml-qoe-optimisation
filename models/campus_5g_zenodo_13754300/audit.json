@@ -1,0 +1,104 @@
+{
+  "rows": 302,
+  "features": [
+    "site",
+    "gnb",
+    "bw",
+    "slots",
+    "ratio",
+    "mbpsoffered_uplink",
+    "mbpsoffered_downlink"
+  ],
+  "targets": [
+    "mbpsactual_uplink",
+    "mbpsactual_downlink",
+    "meanjitterms_uplink",
+    "meanjitterms_downlink",
+    "meanloss_uplink",
+    "meanloss_downlink"
+  ],
+  "target_units": {
+    "throughput": "source metadata says MBps while field names say mbps; unresolved",
+    "jitter": "ms",
+    "loss": "source reported mean loss; scale not specified"
+  },
+  "missing_values": 0,
+  "duplicate_rows": 0,
+  "configuration_groups": 32,
+  "folds": 5,
+  "group_definition": "site-independent combination of gNB, bandwidth, slots, DL:UL ratio, offered uplink/downlink rates",
+  "observed_categories": {
+    "site": [
+      "ntnu",
+      "wue"
+    ],
+    "gnb": [
+      "oai",
+      "srs"
+    ]
+  },
+  "numeric_ranges": {
+    "bw": [
+      20.0,
+      40.0
+    ],
+    "slots": [
+      5.0,
+      20.0
+    ],
+    "ratio": [
+      1.0,
+      4.0
+    ],
+    "mbpsoffered_uplink": [
+      25.0,
+      50.0
+    ],
+    "mbpsoffered_downlink": [
+      75.0,
+      150.0
+    ]
+  },
+  "target_summaries": {
+    "mbpsactual_uplink": {
+      "min": 0.233518582540407,
+      "median": 9.157868687412895,
+      "max": 35.8507114634667
+    },
+    "mbpsactual_downlink": {
+      "min": 14.8505927315176,
+      "median": 64.0050552491757,
+      "max": 142.303634237397
+    },
+    "meanjitterms_uplink": {
+      "min": 0.373467362201596,
+      "median": 2.23528581363173,
+      "max": 66.3596352315841
+    },
+    "meanjitterms_downlink": {
+      "min": 0.0617368102390917,
+      "median": 0.188895575126735,
+      "max": 5.24429452464228
+    },
+    "meanloss_uplink": {
+      "min": 0.0,
+      "median": 0.01289476037635525,
+      "max": 0.956177368045186
+    },
+    "meanloss_downlink": {
+      "min": 0.047202439546845,
+      "median": 0.35520807320492953,
+      "max": 0.864672078765618
+    }
+  },
+  "source_checksums_sha256": {
+    "ntnu_tput_all_Throughput.csv": "c4968908d33aadcf8d1b5b8030db679309dbd11b745c1933bd36d56ed55f715f",
+    "wue_tput_all_Throughput.csv": "dfa1f5bbff178ddc44407453dac146b2d6ab18332a214d61015c9a9b45a4f15b"
+  },
+  "limitations": [
+    "No transmit power, UE count, scenario size, traffic class or project-specific traffic rate.",
+    "No validated equivalence between campus bandwidth/slot/gNB settings and this project's ns-3 knobs.",
+    "Throughput unit and packet-loss scale are not unambiguous in the dataset metadata.",
+    "The fitted models are external-domain research artifacts and must not score ns-3 candidates."
+  ]
+}

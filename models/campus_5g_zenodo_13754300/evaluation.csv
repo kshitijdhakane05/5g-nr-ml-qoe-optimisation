@@ -1,0 +1,25 @@
+target,reported_unit,model,rows,configuration_groups,folds,MAE,RMSE,R2
+mbpsactual_uplink,as provided by source; see provenance limitations,mean,302,32,5,6.337335584530801,7.70062580190531,-0.05610814545052967
+mbpsactual_uplink,as provided by source; see provenance limitations,ridge,302,32,5,6.14871559750213,7.4260643010474965,0.017859177664685144
+mbpsactual_uplink,as provided by source; see provenance limitations,random_forest,302,32,5,4.558441004677558,5.995386741904543,0.35983672134941547
+mbpsactual_uplink,as provided by source; see provenance limitations,hist_gradient_boosting,302,32,5,4.552086630054188,5.765565079806837,0.4079749143751098
+mbpsactual_downlink,as provided by source; see provenance limitations,mean,302,32,5,26.92416598099114,31.666915257578157,-0.03783009502243884
+mbpsactual_downlink,as provided by source; see provenance limitations,ridge,302,32,5,13.707142557225497,18.65454664731301,0.6398494033615725
+mbpsactual_downlink,as provided by source; see provenance limitations,random_forest,302,32,5,13.541614886927906,19.007856768691948,0.6260779793400109
+mbpsactual_downlink,as provided by source; see provenance limitations,hist_gradient_boosting,302,32,5,13.197764025073168,18.657370586668684,0.639740355369847
+meanjitterms_uplink,as provided by source; see provenance limitations,mean,302,32,5,8.775992645569197,11.97986201237957,-0.0473077233429966
+meanjitterms_uplink,as provided by source; see provenance limitations,ridge,302,32,5,8.031054423569339,10.479291386715706,0.19862736587036267
+meanjitterms_uplink,as provided by source; see provenance limitations,random_forest,302,32,5,5.05013039509035,8.87005486803543,0.4258527522683806
+meanjitterms_uplink,as provided by source; see provenance limitations,hist_gradient_boosting,302,32,5,5.462878295151244,8.503394797868078,0.47233855686517123
+meanjitterms_downlink,as provided by source; see provenance limitations,mean,302,32,5,0.14952102238491677,0.39125405651914064,-0.002220724117906414
+meanjitterms_downlink,as provided by source; see provenance limitations,ridge,302,32,5,0.1361322485844647,0.389407600344384,0.0072165707649326505
+meanjitterms_downlink,as provided by source; see provenance limitations,random_forest,302,32,5,0.14808981157719753,0.40565737913325156,-0.07736889592603169
+meanjitterms_downlink,as provided by source; see provenance limitations,hist_gradient_boosting,302,32,5,0.16309649491013822,0.40939334570100855,-0.09730467863574677
+meanloss_uplink,as provided by source; see provenance limitations,mean,302,32,5,0.34440136149954353,0.3716909286213116,-0.003717706559942302
+meanloss_uplink,as provided by source; see provenance limitations,ridge,302,32,5,0.10335197276601711,0.14555167963049265,0.8460845896316243
+meanloss_uplink,as provided by source; see provenance limitations,random_forest,302,32,5,0.06652477543549398,0.12504853076278907,0.8863930636013813
+meanloss_uplink,as provided by source; see provenance limitations,hist_gradient_boosting,302,32,5,0.07685680468650219,0.1304257689672664,0.8764125209565485
+meanloss_downlink,as provided by source; see provenance limitations,mean,302,32,5,0.13354819755913666,0.158503211278713,-0.06251233444681681
+meanloss_downlink,as provided by source; see provenance limitations,ridge,302,32,5,0.11237276135325303,0.13800093652271864,0.19458091406903166
+meanloss_downlink,as provided by source; see provenance limitations,random_forest,302,32,5,0.055713157483998244,0.08228725511507815,0.713632979613179
+meanloss_downlink,as provided by source; see provenance limitations,hist_gradient_boosting,302,32,5,0.06274176482440305,0.08964554852080552,0.6601280625122623

@@ -25,6 +25,7 @@ from simulation.ns3_runner import DEFAULT_NS3_BINARY, Ns3Runner
 from simulation.result_parser import (
     parse_simulation_csv, parse_ue_measurements, validate_simulation_csv,
 )
+from simulation.qoe_forecast import evaluate_next_forecast, forecast_qoe_degradation
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPANSION_RESULTS = ROOT / "results/experiments/ns3_qoe_expansion_20261026_r1_expansion"
@@ -42,6 +43,16 @@ MAX_EPOCHS = 6
 MAX_ACTIONS = 3
 MAX_POST_EPOCH_EXPLORATORY_EPOCHS = 9
 NO_IMPROVEMENT_TOLERANCE = 0.005
+OPERATING_MODES = ("Monitor", "Recommend", "Automatic")
+SUPPORTED_ACTIONS = {
+    "bandwidth_band1_mhz": {
+        "name": "Band 1 bandwidth",
+        "allowed_values_mhz": [20.0, 50.0, 100.0],
+        "application": "ns-3 process restart through --bandwidthBand1",
+        "verification": "completed run_config.json fingerprint and validated qoe_dataset.csv",
+        "cooldown_epochs": 1,
+    },
+}
 PRESET_DEFINITIONS = {
     "Baseline": {"config_id": "ANCHOR-UE2", "purpose": "Verified 2-UE, 50/50 MHz, 35 dBm reference."},
     "Narrow bandwidth": {"config_id": "L9-01", "purpose": "20 MHz Band 1 with 2 UEs; Band 2 remains 50 MHz."},
@@ -81,6 +92,11 @@ HISTORY_COLUMNS = [
     "adaptive_action_budget", "action_budget_exhausted", "post_epoch_exploration",
     "post_epoch_exploration_count", "post_epoch_exploration_limit", "continuation_reason",
     "next_continuation_reason",
+    "operating_mode", "forecast_status", "forecast_horizon_epochs", "forecast_predicted_qoe",
+    "forecast_lower", "forecast_upper", "forecast_risk_ue_ids", "forecast_reason",
+    "forecast_evaluation_json", "action_application_status", "action_fingerprint",
+    "application_error", "verification_epoch", "predicted_qoe_before", "measured_qoe_before",
+    "observed_qoe_after",
     "error_message",
 ]
 
@@ -790,6 +806,8 @@ def decide_next_epoch(
     stable_epochs_required: int = 2,
     maintenance_margin: float = 0.02,
     maintenance_hysteresis: float = 0.02,
+    predictive_forecast: dict[str, Any] | None = None,
+    minimum_expected_benefit: float = 0.0,
 ) -> dict[str, Any]:
     """Choose a next epoch using exact-condition empirical evidence and measurements."""
     if not 0.0 <= float(target_qoe) <= 1.0:
@@ -822,6 +840,9 @@ def decide_next_epoch(
         return {"action": "STOP_INVALID_MEASUREMENT", "rationale": "No valid measured QoE is available.", **budget_fields}
     phase = controller_phase(history, target_qoe=target_qoe, target_tolerance=target_tolerance,
                              stable_epochs_required=stable_epochs_required)
+    forecast = predictive_forecast or {}
+    early_warning = (forecast.get("status") == "RISK_PREDICTED"
+                     and bool(forecast.get("at_risk_ue_ids")))
     target_band = (float(target_qoe) - float(target_tolerance),
                    float(target_qoe) + float(target_tolerance))
     if len(history) >= max_epochs:
@@ -852,7 +873,7 @@ def decide_next_epoch(
         else:
             break
     if qoe is not None and target_range_status(float(qoe), float(target_qoe), float(target_tolerance)) \
-            and phase == "TARGET_SEEKING":
+            and phase == "TARGET_SEEKING" and not early_warning:
         return {
             "action": "CONTINUE_STABILITY", "next_config": current, "controller_phase": phase,
             "prediction": current_prediction,
@@ -862,7 +883,7 @@ def decide_next_epoch(
                          f"need {stable_epochs_required - recent_streak} more consecutive validated epoch(s) "
                          "on this configuration before declaring stable attainment.", **budget_fields,
         }
-    if phase == "TARGET_MAINTENANCE":
+    if phase == "TARGET_MAINTENANCE" and not early_warning:
         safe_margin = float(target_qoe) + float(maintenance_margin)
         if not current_prediction["available"]:
             return {"action": "CONTINUE_MAINTENANCE", "next_config": current,
@@ -1133,6 +1154,20 @@ def decide_next_epoch(
     next_prediction = empirical_qoe_prediction(next_config, target_qoe=target_qoe,
                                                 campaign=performance, live=live_history,
                                                 session_history=history)
+    if minimum_expected_benefit > 0:
+        if not next_prediction.get("available"):
+            return {"action": "NO_ACTION_UNSUPPORTED_BENEFIT", "controller_phase": phase,
+                    "candidate_rejected": next_config,
+                    "rationale": "Candidate has no exact-condition empirical outcome; minimum-benefit policy rejected it.",
+                    "predictive_risk": forecast if early_warning else None, **budget_fields}
+        expected_benefit = float(next_prediction["qoe"]) - float(qoe)
+        if expected_benefit < float(minimum_expected_benefit):
+            return {"action": "NO_ACTION_MINIMUM_BENEFIT", "controller_phase": phase,
+                    "candidate_rejected": next_config,
+                    "expected_qoe_change": expected_benefit,
+                    "rationale": f"Candidate's exact-condition estimate changes QoE by {expected_benefit:+.4f}, "
+                                 f"below the required minimum {float(minimum_expected_benefit):.4f}; no action taken.",
+                    "predictive_risk": forecast if early_warning else None, **budget_fields}
     if phase == "TARGET_MAINTENANCE" and next_prediction["available"]:
         candidate_bound = next_prediction.get("lower")
         current_bound = current_prediction.get("lower")
@@ -1197,6 +1232,24 @@ def decide_next_epoch(
             f"observed outage fraction={next_prediction['outage_fraction']:.3f}; "
             f"support n={next_prediction['run_count']} ({next_prediction['confidence']})"
         )
+    rejected_alternatives = [{
+        "candidate_id": candidate.get("config_id"),
+        "reason": risk_assessments[config_key(candidate)]["reason"],
+    } for candidate in risky]
+    rejected_alternatives.extend({
+        "candidate_id": candidate.get("config_id"),
+        "reason": "Lower-ranked than the selected option by observed outcome evidence and configuration distance.",
+    } for candidate in viable if configuration_fingerprint(candidate) != configuration_fingerprint(next_config))
+    if early_warning:
+        no_action_reason = ("Rejected because the one-epoch forecast identifies UE(s) "
+                            + ", ".join(map(str, forecast.get("at_risk_ue_ids", [])))
+                            + " below the configured target.")
+    elif float(qoe) < float(target_qoe):
+        no_action_reason = (f"Rejected because measured QoE {float(qoe):.4f} is below target "
+                            f"{float(target_qoe):.4f} and the selected candidate has a supported estimate.")
+    else:
+        no_action_reason = "Rejected because the controller ranked a supported alternative above retaining the current setting."
+    rejected_alternatives.append({"candidate_id": None, "kind": "no_action", "reason": no_action_reason})
     return {
         "action": "CHANGE_CONFIGURATION", "next_config": next_config,
         "controller_phase": phase,
@@ -1223,9 +1276,11 @@ def decide_next_epoch(
         "repeat_trials_enabled": bool(allow_repeat_trials),
         "risk_excluded_count": len(risky) + len(exploratory_outage_exclusions),
         "duplicate_excluded_count": len(duplicate_candidates),
+        "rejected_alternatives": rejected_alternatives,
         **budget_fields,
         "is_recovery": False,
-        "rationale": f"{phase}: Measured QoE {qoe:.4f}; select "
+        "rationale": f"{phase}: Measured QoE {qoe:.4f}; "
+                     f"{'forecast risk for UE(s) ' + ', '.join(map(str, forecast.get('at_risk_ue_ids', []))) + '; ' if early_warning else ''}select "
                      f"{'exploratory' if used_exploratory else 'validated'} config "
                      f"{next_config['config_id']} ({empirical}); prediction: {prediction_summary}; "
                      f"ranking basis: {basis}.{excluded}",
@@ -1398,6 +1453,22 @@ def _history_row(event: dict[str, Any]) -> dict[str, Any]:
         "action_outcome_from_previous": event.get("action_outcome_from_previous", ""),
         "controller_action": event.get("controller_action"),
         "action_rationale": event.get("action_rationale"),
+        "operating_mode": event.get("operating_mode", ""),
+        "forecast_status": (event.get("forecast") or {}).get("status", ""),
+        "forecast_horizon_epochs": (event.get("forecast") or {}).get("horizon_epochs", ""),
+        "forecast_predicted_qoe": (event.get("forecast") or {}).get("predicted_qoe", ""),
+        "forecast_lower": (event.get("forecast") or {}).get("lower", ""),
+        "forecast_upper": (event.get("forecast") or {}).get("upper", ""),
+        "forecast_risk_ue_ids": json.dumps((event.get("forecast") or {}).get("at_risk_ue_ids", [])),
+        "forecast_reason": (event.get("forecast") or {}).get("reason", ""),
+        "forecast_evaluation_json": json.dumps(event.get("forecast_evaluation")) if event.get("forecast_evaluation") else "",
+        "action_application_status": event.get("action_application_status", ""),
+        "action_fingerprint": event.get("action_fingerprint", ""),
+        "application_error": event.get("application_error", ""),
+        "verification_epoch": event.get("verification_epoch", ""),
+        "predicted_qoe_before": event.get("predicted_qoe_before", ""),
+        "measured_qoe_before": event.get("measured_qoe_before", ""),
+        "observed_qoe_after": event.get("observed_qoe_after", ""),
         "prior_qoe_proxy": event.get("prior_qoe_proxy") if event.get("prior_qoe_proxy") is not None else "",
         "current_qoe_proxy": event.get("measured_qoe_proxy") if event.get("measured_qoe_proxy") is not None else "",
         "is_outage": (event.get("metrics") or {}).get("is_outage", ""),
@@ -1437,6 +1508,40 @@ def _append_history_csv(session_dir: Path, event: dict[str, Any]) -> None:
         csv.DictWriter(handle, fieldnames=HISTORY_COLUMNS).writerow(_history_row(event))
 
 
+def _persist_updated_event(session_dir: Path, event: dict[str, Any]) -> None:
+    """Replace a previously written epoch snapshot after approval/application verification."""
+    key = (str(event.get("session_id", "")), str(event.get("epoch", "")))
+    events_path = session_dir / "events.jsonl"
+    if events_path.is_file():
+        records = []
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (str(record.get("session_id", "")), str(record.get("epoch", ""))) == key:
+                record = event
+            records.append(record)
+        temporary = events_path.with_suffix(".jsonl.tmp")
+        temporary.write_text("".join(json.dumps(item, sort_keys=True, allow_nan=False) + "\n"
+                                                 for item in records), encoding="utf-8")
+        temporary.replace(events_path)
+
+    csv_path = session_dir / "epoch_history.csv"
+    if csv_path.is_file():
+        with csv_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        for row in rows:
+            if (str(row.get("session_id", "")), str(row.get("epoch", ""))) == key:
+                row.update(_history_row(event))
+        temporary = csv_path.with_suffix(".csv.tmp")
+        with temporary.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=HISTORY_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        temporary.replace(csv_path)
+
+
 def _terminate_owned_process(process: subprocess.Popen[Any]) -> str:
     """Terminate only the child handle created by this epoch and reap it safely."""
     if process.poll() is not None:
@@ -1463,6 +1568,7 @@ def _terminate_owned_process(process: subprocess.Popen[Any]) -> str:
 def create_live_session(
     *, initial_config: dict[str, Any], target_qoe: float = 0.80, max_epochs: int = 3,
     mode: str = "adaptive", output_root: str | Path = LIVE_RESULTS,
+    operating_mode: str = "Automatic",
     expansion_dir: str | Path = EXPANSION_RESULTS, binary: str | Path = DEFAULT_NS3_BINARY,
     preset_name: str = "Custom", rng_seed: int = RNG_SEED, rng_run_start: int = 1,
     timeout_seconds: float = RUN_TIMEOUT_SECONDS, max_actions: int = MAX_ACTIONS,
@@ -1478,8 +1584,13 @@ def create_live_session(
     stable_epochs_required: int = 2,
     maintenance_margin: float = 0.02,
     maintenance_hysteresis: float = 0.02,
+    minimum_expected_benefit: float = 0.02,
     stability_validation_epochs: int = 5,
 ) -> tuple[str, Path, subprocess.Popen[Any]]:
+    if operating_mode not in OPERATING_MODES:
+        raise ValueError(f"Operating mode must be one of {OPERATING_MODES}.")
+    if operating_mode == "Monitor":
+        mode = "fixed"
     if not 0.0 <= float(target_qoe) <= 1.0:
         raise ValueError("Target QoE must be in [0,1]")
     if not 1 <= int(max_epochs) <= MAX_EPOCHS:
@@ -1497,6 +1608,8 @@ def create_live_session(
         raise ValueError("Target tolerance must be 0..0.1 and stable epoch count must be 1..5.")
     if not 0.0 <= float(maintenance_margin) <= 0.2 or not 0.0 <= float(maintenance_hysteresis) <= 0.2:
         raise ValueError("Maintenance margin and hysteresis must be in 0..0.2.")
+    if not 0.0 <= float(minimum_expected_benefit) <= 0.5:
+        raise ValueError("Minimum expected benefit must be in 0..0.5.")
     if not 1 <= int(stability_validation_epochs) <= 10:
         raise ValueError("Stability validation epochs must be in 1..10.")
     feasible = load_verified_configurations(expansion_dir)
@@ -1541,6 +1654,14 @@ def create_live_session(
                 if key in normalized:
                     adjusted[key] = normalized[key]
             action_configs.append(adjusted)
+    # The first controller release exposes one verified action only: Band 1
+    # bandwidth. It is applied to the next ns-3 process, never hot-swapped.
+    action_configs = [candidate for candidate in action_configs
+                      if float(candidate.get("total_tx_power_dbm", 0))
+                      == float(normalized.get("total_tx_power_dbm", 35))
+                      and float(candidate.get("bandwidth_band1_mhz", -1))
+                      in SUPPORTED_ACTIONS["bandwidth_band1_mhz"]["allowed_values_mhz"]
+                      and int(candidate.get("gnb_count", 1)) == int(normalized.get("gnb_count", 1))]
     campaign_semantics_match = int(normalized.get("gnb_count", 1)) == 1 and all([
         float(normalized.get("bandwidth_band2_mhz", 50)) == 50.0,
         int(normalized.get("lambda_be_pps", 20_000)) == 20_000,
@@ -1554,7 +1675,7 @@ def create_live_session(
     live_candidate_performance = load_live_candidate_evidence(normalized)
     validated_action_configs = action_configs if campaign_semantics_match else []
     exploratory_configs = supported_radio_grid(normalized, feasible)
-    if allow_topology_exploration:
+    if allow_topology_exploration and operating_mode != "Monitor":
         exploratory_configs.extend(supported_topology_candidates(
             normalized, feasible, candidate_budget=topology_candidate_budget,
             candidate_performance=candidate_performance if campaign_semantics_match else {},
@@ -1577,6 +1698,8 @@ def create_live_session(
         "status": "QUEUED", "phase": "QUEUED", "heartbeat_utc": utc_now(),
         "preset_name": preset_name, "target_qoe": float(target_qoe), "max_epochs": int(max_epochs),
         "controller_mode": mode, "initial_config": normalized, "current_config": normalized,
+        "operating_mode": operating_mode,
+        "supported_action_registry": SUPPORTED_ACTIONS,
         "current_epoch": 0, "max_actions": int(max_actions),
         "allow_exploratory_candidates": bool(allow_exploratory_candidates),
         "allow_high_risk_candidates": bool(allow_high_risk_candidates),
@@ -1594,6 +1717,7 @@ def create_live_session(
         "validation_epochs_required": int(stability_validation_epochs),
         "maintenance_margin": float(maintenance_margin),
         "maintenance_hysteresis": float(maintenance_hysteresis),
+        "minimum_expected_benefit": float(minimum_expected_benefit),
         "controller_phase": "TARGET_SEEKING",
         "post_epoch_exploration_count": 0,
         "no_improvement_tolerance": NO_IMPROVEMENT_TOLERANCE, "rng_seed": int(rng_seed),
@@ -1623,7 +1747,7 @@ def create_live_session(
     _write_json(session_dir / "session.json", state)
     _write_json(session_dir / "session_config.json", {
         "target_qoe": target_qoe, "max_epochs": max_epochs, "max_actions": int(max_actions),
-        "mode": mode, "preset_name": preset_name,
+        "mode": mode, "operating_mode": operating_mode, "preset_name": preset_name,
         "initial_config": normalized, "feasible_configurations": validated_action_configs,
         "allow_exploratory_candidates": bool(allow_exploratory_candidates),
         "allow_high_risk_candidates": bool(allow_high_risk_candidates),
@@ -1637,6 +1761,7 @@ def create_live_session(
         "stability_validation_epochs": int(stability_validation_epochs),
         "maintenance_margin": float(maintenance_margin),
         "maintenance_hysteresis": float(maintenance_hysteresis),
+        "minimum_expected_benefit": float(minimum_expected_benefit),
         "exploratory_configurations": exploratory_configs,
         "candidate_performance": [{"key": list(k), **v} for k, v in candidate_performance.items()],
         "pilot_candidate_performance": [{"key": list(k), **v} for k, v in pilot_performance.items()],
@@ -1678,6 +1803,99 @@ def request_session_stop(session_dir: str | Path) -> None:
         raise FileNotFoundError(folder)
     (folder / "STOP_REQUESTED").write_text(utc_now() + "\n", encoding="utf-8")
     _log(folder, "User requested stop; active ns-3 child will be terminated if running.")
+
+
+def request_action_approval(session_dir: str | Path, *, approve: bool) -> dict[str, Any]:
+    """Approve or reject only the currently persisted recommendation fingerprint."""
+    folder = Path(session_dir)
+    state = read_session_state(folder)
+    pending = state.get("pending_action") or {}
+    if state.get("status") != "WAITING_FOR_APPROVAL" or not pending.get("fingerprint"):
+        raise ValueError("There is no pending configuration action to approve or reject.")
+    marker = folder / f"action_decision_epoch_{int(pending['epoch'])}.json"
+    if marker.exists():
+        raise ValueError("A decision has already been recorded for this recommendation.")
+    decision = {"approve": bool(approve), "fingerprint": pending["fingerprint"],
+                "timestamp_utc": utc_now(), "reviewed_by": "dashboard user"}
+    _write_json(marker, decision)
+    _append_jsonl(folder / "interventions.jsonl", {
+        "timestamp_utc": decision["timestamp_utc"], "session_id": state["session_id"],
+        "epoch": pending["epoch"], "status": "APPROVED" if approve else "REJECTED",
+        "fingerprint": pending["fingerprint"], "action": pending["action"],
+        "previous_config": pending["previous_config"], "proposed_config": pending["proposed_config"],
+        "rationale": pending["rationale"],
+    })
+    return decision
+
+
+def read_intervention_events(session_dir: str | Path) -> list[dict[str, Any]]:
+    path = Path(session_dir) / "interventions.jsonl"
+    if not path.is_file():
+        return []
+    result = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            result.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return result
+
+
+def _wait_for_recommendation(folder: Path, state: dict[str, Any], event: dict[str, Any],
+                             decision: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Pause Recommend mode until the UI approves this exact configuration."""
+    candidate = decision.get("next_config")
+    if not candidate:
+        return False, decision
+    proposal = {
+        "epoch": int(event["epoch"]), "action": "Band 1 bandwidth restart",
+        "previous_config": event.get("config"), "proposed_config": candidate,
+        "fingerprint": configuration_fingerprint(candidate),
+        "rationale": decision.get("rationale", ""),
+        "predicted_qoe": decision.get("predicted_qoe"),
+        "forecast": event.get("forecast"),
+    }
+    state.update({"status": "WAITING_FOR_APPROVAL", "phase": "WAITING_FOR_APPROVAL",
+                  "pending_action": proposal, "heartbeat_utc": utc_now()})
+    _write_json(folder / "session.json", state)
+    marker = folder / f"action_decision_epoch_{int(event['epoch'])}.json"
+    _log(folder, f"Recommendation pending user approval: {proposal['fingerprint']}")
+    while True:
+        if (folder / "STOP_REQUESTED").exists():
+            _append_jsonl(folder / "interventions.jsonl", {
+                "timestamp_utc": utc_now(), "session_id": state["session_id"],
+                "epoch": event["epoch"], "status": "CANCELLED_BEFORE_APPLICATION",
+                "fingerprint": proposal["fingerprint"],
+                "reason": "User stopped session while approval was pending.",
+            })
+            return False, decision
+        if marker.is_file():
+            try:
+                answer = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                answer = {}
+            if answer.get("fingerprint") != proposal["fingerprint"]:
+                raise ValueError("Approval fingerprint does not match the persisted recommendation.")
+            if answer.get("approve") is True:
+                _log(folder, "Recommendation approved; next epoch will apply it through a new ns-3 process.")
+                event["action_application_status"] = "APPROVED_RESTART"
+                state.update({"status": "RUNNING", "phase": "ACTION_APPROVED",
+                              "pending_action": None, "heartbeat_utc": utc_now()})
+                _write_json(folder / "session.json", state)
+                return True, decision
+            _log(folder, "Recommendation rejected; next epoch retains the current configuration.")
+            event["action_application_status"] = "REJECTED"
+            decision = dict(decision)
+            decision["next_config"] = event["config"]
+            decision["action"] = "CONTINUE_FIXED"
+            decision["rationale"] = "User rejected the recommendation; retain the current configuration."
+            state.update({"status": "RUNNING", "phase": "ACTION_REJECTED",
+                          "pending_action": None, "heartbeat_utc": utc_now()})
+            _write_json(folder / "session.json", state)
+            return True, decision
+        state["heartbeat_utc"] = utc_now()
+        _write_json(folder / "session.json", state)
+        time.sleep(0.5)
 
 
 def read_session_state(session_dir: str | Path) -> dict[str, Any]:
@@ -1725,7 +1943,7 @@ def mark_worker_lost(session_dir: str | Path) -> dict[str, Any]:
     """Persist a visible failure if the recorded worker has exited unexpectedly."""
     folder = Path(session_dir)
     state = read_session_state(folder)
-    if state.get("status") not in {"RUNNING", "QUEUED"}:
+    if state.get("status") not in {"RUNNING", "QUEUED", "WAITING_FOR_APPROVAL"}:
         return state
     pid = state.get("worker_pid")
     if not pid and (folder / "worker.pid").is_file():
@@ -2097,7 +2315,9 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                     }),
                 )
                 event.update(current_selection)
-                event.update({"controller_mode": state["controller_mode"], "target_qoe": float(state["target_qoe"]),
+                event.update({"controller_mode": state["controller_mode"],
+                              "operating_mode": state.get("operating_mode", "Automatic"),
+                              "target_qoe": float(state["target_qoe"]),
                               "configuration_fingerprint": configuration_fingerprint(current),
                               "controller_phase": state.get("controller_phase", "TARGET_SEEKING"),
                               "post_epoch_exploration": is_post_epoch_trial,
@@ -2107,6 +2327,43 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                                   float(event["measured_qoe_proxy"]), float(state["target_qoe"]),
                                   float(state.get("target_tolerance", 0.005)))
                                   if event.get("measured_qoe_proxy") is not None else False)})
+                if history:
+                    prior_action = history[-1]
+                    application_status = prior_action.get("action_application_status")
+                    expected_config = prior_action.get("next_config")
+                    if (application_status in {"SCHEDULED_RESTART", "APPROVED_RESTART"}
+                            and expected_config
+                            and configuration_fingerprint(expected_config) == configuration_fingerprint(current)):
+                        verified = (event.get("run_status") == "COMPLETED"
+                                    and event.get("configuration_fingerprint") == configuration_fingerprint(expected_config))
+                        event["action_application_status"] = "APPLIED_AND_VERIFIED" if verified else "APPLICATION_FAILED"
+                        prior_action["action_application_status"] = (
+                            "APPLIED_AND_VERIFIED" if verified else "APPLICATION_FAILED"
+                        )
+                        prior_action["application_error"] = None if verified else event.get("error_message")
+                        prior_action["verification_epoch"] = epoch
+                        prior_action["observed_qoe_after"] = (
+                            event.get("measured_qoe_proxy") if verified else None
+                        )
+                        predicted_after = prior_action.get("next_predicted_qoe")
+                        observed_after = event.get("measured_qoe_proxy") if verified else None
+                        _append_jsonl(folder / "interventions.jsonl", {
+                            "timestamp_utc": utc_now(), "session_id": state["session_id"],
+                            "epoch": prior_action.get("epoch"),
+                            "status": "VERIFIED" if verified else "APPLICATION_FAILED",
+                            "action": "Band 1 bandwidth restart",
+                            "previous_config": prior_action.get("config"),
+                            "new_config": current,
+                            "configuration_fingerprint": event.get("configuration_fingerprint"),
+                            "predicted_qoe_after": predicted_after,
+                            "observed_qoe_after": observed_after,
+                            "prediction_error": (abs(float(observed_after) - float(predicted_after))
+                                                 if observed_after is not None and predicted_after is not None else None),
+                            "measured_metrics": event.get("metrics") if verified else None,
+                            "verification": "successful process, matching configuration fingerprint, validated simulator CSV"
+                                if verified else event.get("error_message"),
+                        })
+                        _persist_updated_event(folder, prior_action)
                 event_history = history + [event]
                 event.update({
                     "adaptive_action_count": sum(
@@ -2139,6 +2396,23 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                     "current_qoe_proxy": event.get("measured_qoe_proxy"),
                     "is_outage": bool((event.get("metrics") or {}).get("is_outage", False)),
                 })
+                if history and event.get("run_status") == "COMPLETED":
+                    evaluation = evaluate_next_forecast(history[-1], event)
+                    if evaluation:
+                        event["forecast_evaluation"] = evaluation
+                forecast = forecast_qoe_degradation(
+                    event_history, target_qoe=float(state["target_qoe"]), horizon_epochs=1,
+                ) if event.get("run_status") == "COMPLETED" else {
+                    "status": "UNAVAILABLE", "reason": "No valid measurement from this epoch.",
+                    "predicted_qoe": None, "at_risk_ue_ids": [],
+                }
+                event["forecast"] = forecast
+                event["forecast_for_next"] = ({**forecast, "target_epoch": epoch + 1}
+                                                if forecast.get("predicted_qoe") is not None else None)
+                event["action_application_status"] = "NO_ACTION"
+                state.update({"latest_forecast": forecast,
+                              "latest_forecast_error": event.get("forecast_evaluation"),
+                              "heartbeat_utc": utc_now()})
                 predicted = event.get("predicted_qoe")
                 if predicted is not None and event.get("run_status") == "COMPLETED" \
                         and event.get("measured_qoe_proxy") is not None:
@@ -2298,6 +2572,8 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                         stable_epochs_required=int(state.get("stable_epochs_required", 2)),
                         maintenance_margin=float(state.get("maintenance_margin", 0.02)),
                         maintenance_hysteresis=float(state.get("maintenance_hysteresis", 0.02)),
+                        predictive_forecast=forecast,
+                        minimum_expected_benefit=float(state.get("minimum_expected_benefit", 0.02)),
                     )
                     if decision.get("action") in {"STOP_EPOCH_LIMIT", "STOP_TARGET_STABLE"} and run_remaining_experimental:
                         decision = decide_post_epoch_exploration(
@@ -2318,6 +2594,42 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                         )
                 completed_extra_epochs = sum(bool(item.get("post_epoch_exploration"))
                                              for item in decision_history)
+                proposed_config = decision.get("next_config")
+                action_changes_config = (decision.get("action") == "CHANGE_CONFIGURATION"
+                                         and proposed_config is not None
+                                         and configuration_fingerprint(proposed_config)
+                                             != configuration_fingerprint(current))
+                if action_changes_config:
+                    event["action_application_status"] = (
+                        "PENDING_APPROVAL" if state.get("operating_mode") == "Recommend"
+                        else "SCHEDULED_RESTART"
+                    )
+                    event["action_fingerprint"] = configuration_fingerprint(proposed_config)
+                    event["predicted_qoe_before"] = forecast.get("predicted_qoe")
+                    event["measured_qoe_before"] = event.get("measured_qoe_proxy")
+                    intervention = {
+                        "timestamp_utc": utc_now(), "session_id": state["session_id"],
+                        "epoch": epoch, "status": "PROPOSED",
+                        "action": "Band 1 bandwidth restart",
+                        "parameter": "bandwidth_band1_mhz",
+                        "previous_value_mhz": current.get("bandwidth_band1_mhz"),
+                        "new_value_mhz": proposed_config.get("bandwidth_band1_mhz"),
+                        "previous_config": current, "new_config": proposed_config,
+                        "configuration_fingerprint": event["action_fingerprint"],
+                        "predicted_qoe_before": forecast.get("predicted_qoe"),
+                        "measured_qoe_before": event.get("measured_qoe_proxy"),
+                        "predicted_qoe_after": decision.get("predicted_qoe"),
+                        "forecast": forecast, "affected_ue_ids": forecast.get("at_risk_ue_ids", []),
+                        "rationale": decision.get("rationale"),
+                        "application": SUPPORTED_ACTIONS["bandwidth_band1_mhz"]["application"],
+                        "verification_method": SUPPORTED_ACTIONS["bandwidth_band1_mhz"]["verification"],
+                        "rejected_alternatives": decision.get("rejected_alternatives", []),
+                    }
+                    _append_jsonl(folder / "interventions.jsonl", intervention)
+                    if state.get("operating_mode") == "Automatic":
+                        _append_jsonl(folder / "interventions.jsonl", {
+                            **intervention, "timestamp_utc": utc_now(), "status": "SCHEDULED_RESTART",
+                        })
                 event.update({"controller_action": decision["action"], "action_rationale": decision["rationale"],
                               "next_config": decision.get("next_config"), "worker_state": "COMPLETED",
                               "next_topology_candidate_id": (decision.get("next_config") or {}).get("config_id")
@@ -2378,6 +2690,7 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                     "expected_effect": (f"Empirical QoE estimate {float(prediction['qoe']):.4f}"
                                         if prediction.get("available") and prediction.get("qoe") is not None
                                         else "Not estimated."),
+                    "rejected_alternatives": decision.get("rejected_alternatives", []),
                     "measured_qoe_proxy": event.get("measured_qoe_proxy"),
                     "measured_metrics": event.get("metrics"),
                     "target_range_pass": event.get("target_range_pass"),
@@ -2391,6 +2704,18 @@ def _run_live_session_locked(session_dir: str | Path, timeout_seconds: float = R
                      f"action={event['controller_action']}; {event['action_rationale']}")
                 if decision["action"] in {"CHANGE_CONFIGURATION", "CONTINUE_FIXED", "CONTINUE_POST_EPOCH_EXPLORATION",
                                            "CONTINUE_STABILITY", "CONTINUE_MAINTENANCE"}:
+                    if action_changes_config and state.get("operating_mode") == "Recommend":
+                        proceed, decision = _wait_for_recommendation(folder, state, event, decision)
+                        _persist_updated_event(folder, event)
+                        if not proceed:
+                            state.update({"status": "USER_CANCELLED", "phase": "CANCELLED",
+                                          "ended_utc": utc_now(), "pending_action": None,
+                                          "final_outcome": "User stopped while a proposed action was awaiting approval."})
+                            _write_json(folder / "session.json", state)
+                            return
+                        if event.get("action_application_status") == "REJECTED":
+                            event["controller_action"] = "ACTION_REJECTED"
+                            event["action_rationale"] = decision["rationale"]
                     current = decision["next_config"]
                     current_selection = {
                         "candidate_scope": decision.get("candidate_scope", "fixed baseline configuration"),

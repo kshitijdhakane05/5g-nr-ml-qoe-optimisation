@@ -1,0 +1,47 @@
+{
+  "status": "INSUFFICIENT_INDEPENDENT_VALIDATION_DATA",
+  "created_utc": "2026-10-30T22:39:51+00:00",
+  "protocol": "Monitor-only sessions; per-UE chronological forecasts; same segment; intervention-censored; session-level chronological 75/25 split.",
+  "target": "measured per-UE service QoE (0-1)",
+  "method": "OLS linear trend, last 5 windows, 5s horizon",
+  "eligible_sessions": 4,
+  "train_sessions": 3,
+  "held_out_sessions": 1,
+  "train": {
+    "samples": 24,
+    "trend_mae": 0.10068943749999999,
+    "trend_rmse": 0.1997698373920754,
+    "persistence_mae": 0.09907437499999999,
+    "trend_bias_prediction_minus_measurement": 0.10068943749999999,
+    "safety_floor_crossing": {
+      "positive_cases": 0,
+      "true_positive": 0,
+      "false_positive": 0,
+      "missed_crossing": 0,
+      "precision": null,
+      "recall": null
+    }
+  },
+  "held_out": {
+    "samples": 8,
+    "trend_mae": 0.1006894375,
+    "trend_rmse": 0.1997698373920754,
+    "persistence_mae": 0.09907437499999999,
+    "trend_bias_prediction_minus_measurement": 0.1006894375,
+    "safety_floor_crossing": {
+      "positive_cases": 0,
+      "true_positive": 0,
+      "false_positive": 0,
+      "missed_crossing": 0,
+      "precision": null,
+      "recall": null
+    }
+  },
+  "limitations": [
+    "Overlapping forecast windows are correlated; sample count is not independent user-run count.",
+    "Only Monitor data is included; intervention and impairment windows are censored.",
+    "Trend must outperform persistence on held-out sessions before it is presented as useful forecasting.",
+    "This report evaluates accuracy; it does not tune or silently change live thresholds.",
+    "Do not claim calibrated probabilities from this point forecast."
+  ]
+}

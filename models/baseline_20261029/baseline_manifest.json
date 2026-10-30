@@ -1,0 +1,15 @@
+{
+  "captured": "2026-10-29",
+  "branch": "experiment/online-dataset-dashboard",
+  "production_model": "models/qoe_model.joblib",
+  "production_model_sha256": "a4283974d798d77c086bbee8681df358dfe6cd5d43ee545f572ee2ac1a73aa00",
+  "baseline_copy": "models/baseline_20261029/qoe_model.joblib",
+  "baseline_copy_sha256": "a4283974d798d77c086bbee8681df358dfe6cd5d43ee545f572ee2ac1a73aa00",
+  "evaluation_copy": "results/ml/baseline_20261029/model_results.csv",
+  "evaluation_sha256": "b0af4b855d9de8bff2c044934fcefe60836bd3101d3aff25c078a9b901571e8f",
+  "prediction_copy": "results/ml/baseline_20261029/predictions.csv",
+  "prediction_sha256": "1b266fc057def3979992a6f0fab6ee7650ab0f5edb3316e6d1b0a56e62bfca7c",
+  "source_dataset_backup": "data/backup/qoe_dataset_original.csv",
+  "source_dataset_sha256": "2a4bd15fd752be63cee31c7d0920de078980a0a55287f69da1a985c51dd186f8",
+  "note": "Baseline preserved byte-for-byte. External campus benchmark is not promoted to the production inference or optimization path."
+}

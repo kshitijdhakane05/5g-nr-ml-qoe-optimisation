@@ -146,6 +146,8 @@ class LiveNs3ControllerTests(unittest.TestCase):
         self.assertEqual(decision["next_config"]["config_id"], "ANCHOR-UE2")
         self.assertIn("Prediction unavailable", decision["rationale"])
         self.assertIn("Measured QoE", decision["rationale"])
+        rejected = decision["rejected_alternatives"]
+        self.assertTrue(any(item.get("kind") == "no_action" for item in rejected))
 
     def test_next_action_uses_previous_measured_improvement_and_changes_configuration(self):
         first = {

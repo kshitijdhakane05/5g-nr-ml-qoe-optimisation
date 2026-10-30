@@ -1,0 +1,104 @@
+{
+  "artifact_version": "live-ns3-kpi-v1",
+  "created_by": "ml/train_live_hybrid.py",
+  "dataset_path": "data/processed/qoe_dataset.csv",
+  "dataset_sha256": "0628c5c53ff31d98b545a2e0403d954e1a77ac66b0760cdc87155201e86352e2",
+  "rows": 720,
+  "raw_source_path": "data/raw/qoe_dataset.csv",
+  "raw_source_sha256": "2a4bd15fd752be63cee31c7d0920de078980a0a55287f69da1a985c51dd186f8",
+  "dataset_generation": "Project ns-3 scratch/qoe-dataset.cc flow-level measurements; processed features from ml/preprocessing.py. Not the external 5G campus dataset.",
+  "independent_scenario_groups": 120,
+  "training_rows": 590,
+  "training_groups": 96,
+  "holdout_rows": 130,
+  "holdout_groups": 24,
+  "split": "GroupShuffleSplit by scenario_id; test_size=0.20; no scenario overlap",
+  "random_state": 42,
+  "features": [
+    "ue_count",
+    "bandwidth_mhz",
+    "total_tx_power_dbm",
+    "scenario_size_m",
+    "flow_type_id",
+    "flow_lambda",
+    "packet_size_bytes",
+    "offered_throughput_mbps"
+  ],
+  "targets": [
+    "throughput_mbps",
+    "delay_ms",
+    "jitter_ms",
+    "packet_loss"
+  ],
+  "target_units": {
+    "throughput_mbps": "Mbps",
+    "delay_ms": "ms",
+    "jitter_ms": "ms",
+    "packet_loss": "fraction [0,1]"
+  },
+  "qoe_evaluation": "QoE v2 recomputed from held-out predicted KPI values and predicted receive probability; actual held-out QoE uses observed reception status. QoE is not a trained label.",
+  "classification_target": "received (rx_packets > 0); predicts reception probability",
+  "qoe_metrics": {
+    "low_latency": {
+      "rows": 65,
+      "mae": 0.003934751850995742,
+      "baseline_mae": 0.13801579825011726
+    },
+    "voice_qos": {
+      "rows": 65,
+      "mae": 0.014372742765400568,
+      "baseline_mae": 0.07217295837622778
+    }
+  },
+  "kpi_metrics": {
+    "throughput_mbps": {
+      "baseline_mae": 16.54536272281617,
+      "baseline_rmse": 24.80780422616388,
+      "model_mae": 2.266471357974925,
+      "model_rmse": 5.414327135313277,
+      "model_r2": 0.9523592729075051
+    },
+    "delay_ms": {
+      "baseline_mae": 63.10753990245111,
+      "baseline_rmse": 83.77222766988713,
+      "model_mae": 10.629762595884431,
+      "model_rmse": 25.457617209469714,
+      "model_r2": 0.9076462291012938
+    },
+    "jitter_ms": {
+      "baseline_mae": 0.11803309657366362,
+      "baseline_rmse": 0.18114649917241732,
+      "model_mae": 0.03136000607904977,
+      "model_rmse": 0.08395436376744682,
+      "model_r2": 0.7852036914004924
+    },
+    "packet_loss": {
+      "baseline_mae": 0.38571861011311603,
+      "baseline_rmse": 0.42490464034952097,
+      "model_mae": 0.029566022916465314,
+      "model_rmse": 0.0782199838743955,
+      "model_r2": 0.9659027773202742
+    }
+  },
+  "reception_classifier_metrics": {
+    "accuracy": 1.0,
+    "brier_score": 0.0,
+    "positive_rate": 0.47692307692307695
+  },
+  "supported_context_count": 150,
+  "safety_scope": {
+    "traffic_mix": "legacy only",
+    "gNB count": 1,
+    "total_tx_power_dbm": 35.0,
+    "context": "exact observed UE/radio/workload tuples only",
+    "unsupported": "NGMN gaming/video, multi-cell, other power and unobserved workload contexts",
+    "not_modeled": "per-UE location, serving cell, or radio-channel realization; same class/config UEs share a prediction"
+  },
+  "software": {
+    "python": "3.12.3",
+    "scikit_learn": "1.9.1",
+    "pandas": "3.0.6",
+    "numpy": "2.5.3"
+  },
+  "model_sha256": "bd5d8d7d23a15dadc62f7211e711ff22bd47fb2953ec34d987c961bff3231de5"
+}

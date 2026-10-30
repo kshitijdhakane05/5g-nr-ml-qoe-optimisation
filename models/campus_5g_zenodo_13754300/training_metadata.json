@@ -1,0 +1,36 @@
+{
+  "artifact_version": "campus-zenodo-13754300-v1-20261029",
+  "python": "3.12.3",
+  "numpy": "2.5.4",
+  "pandas": "3.1.0",
+  "scikit_learn": "1.9.1",
+  "random_state": 42,
+  "cross_validation": "5-fold GroupKFold by configuration_group",
+  "selection_rule": "lowest grouped-CV RMSE per target; refit selected estimator on all 302 rows",
+  "selected_models": {
+    "mbpsactual_uplink": "hist_gradient_boosting",
+    "mbpsactual_downlink": "ridge",
+    "meanjitterms_uplink": "hist_gradient_boosting",
+    "meanjitterms_downlink": "ridge",
+    "meanloss_uplink": "random_forest",
+    "meanloss_downlink": "random_forest"
+  },
+  "feature_columns": [
+    "site",
+    "gnb",
+    "bw",
+    "slots",
+    "ratio",
+    "mbpsoffered_uplink",
+    "mbpsoffered_downlink"
+  ],
+  "target_columns": [
+    "mbpsactual_uplink",
+    "mbpsactual_downlink",
+    "meanjitterms_uplink",
+    "meanjitterms_downlink",
+    "meanloss_uplink",
+    "meanloss_downlink"
+  ],
+  "source": "https://doi.org/10.5281/zenodo.13754300"
+}

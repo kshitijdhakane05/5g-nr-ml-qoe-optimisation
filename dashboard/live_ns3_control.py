@@ -17,10 +17,12 @@ from simulation.live_control import (
     assess_candidate_risk,
     configuration_fingerprint,
     create_live_session,
+    request_action_approval,
     list_live_sessions,
     load_verified_configurations,
     mark_worker_lost,
     production_feature_contract_audit,
+    read_intervention_events,
     read_session_events,
     read_session_state,
     request_session_stop,
@@ -29,6 +31,7 @@ from simulation.live_control import (
     validate_exploratory_candidate,
     validate_custom_config,
 )
+from simulation.qoe_forecast import telemetry_freshness
 
 
 def build_qoe_figure(events: list[dict[str, Any]], target_qoe: float) -> go.Figure:
@@ -66,6 +69,17 @@ def build_qoe_figure(events: list[dict[str, Any]], target_qoe: float) -> go.Figu
                        "<br>Power %{customdata[4]} dBm · %{customdata[5]}"
                        "<br>Decision %{customdata[6]}<extra></extra>"),
     ))
+    forecast_x = [int(event["epoch"]) + int((event.get("forecast") or {}).get("horizon_epochs", 1))
+                  for event in events if (event.get("forecast") or {}).get("predicted_qoe") is not None]
+    forecast_y = [(event.get("forecast") or {}).get("predicted_qoe")
+                  for event in events if (event.get("forecast") or {}).get("predicted_qoe") is not None]
+    if forecast_x:
+        figure.add_trace(go.Scatter(
+            x=forecast_x, y=forecast_y, mode="lines+markers", name="One-epoch QoE trend forecast",
+            marker={"size": 9, "symbol": "diamond", "color": "#d97706"},
+            line={"color": "#d97706", "width": 2, "dash": "dot"},
+            hovertemplate="Epoch %{x}<br>Trend forecast %{y:.4f}<extra>Baseline forecast</extra>",
+        ))
     predicted = [float(event["predicted_qoe"]) if event.get("predicted_qoe") is not None else None
                  for event in events]
     prediction_errors = []
@@ -247,7 +261,7 @@ def prepare_session_review_state(session_state: Any, session_ids: list[str]) -> 
 
 def session_status_label(state: dict[str, Any]) -> str:
     status = state.get("status", "UNKNOWN")
-    if status in {"QUEUED", "RUNNING"} and state.get("stop_requested"):
+    if status in {"QUEUED", "RUNNING", "WAITING_FOR_APPROVAL"} and state.get("stop_requested"):
         return "Stopping"
     labels = {
         "IDLE": "Idle",
@@ -266,6 +280,7 @@ def session_status_label(state: dict[str, Any]) -> str:
         "NO_MEANINGFUL_IMPROVEMENT": "No meaningful improvement",
         "NO_FEASIBLE_CANDIDATES": "No validated candidates (legacy stop label)",
         "NO_IMPROVEMENT_AFTER_AVAILABLE_TRIALS": "No improvement after available trials",
+        "WAITING_FOR_APPROVAL": "Recommendation awaiting approval",
         "SIMULATION_FAILURE": "Simulation failure",
         "SIMULATION_TIMEOUT": "Simulation timeout",
         "USER_CANCELLED": "User cancelled",
@@ -289,7 +304,7 @@ def session_status_label(state: dict[str, Any]) -> str:
 def session_status_explanation(state: dict[str, Any]) -> str:
     """Return a brief plain-language explanation for the saved session status."""
     status = state.get("status", "UNKNOWN")
-    if status in {"QUEUED", "RUNNING"} and state.get("stop_requested"):
+    if status in {"QUEUED", "RUNNING", "WAITING_FOR_APPROVAL"} and state.get("stop_requested"):
         return "A safe stop was requested. The owned ns-3 process is being cancelled."
     explanations = {
         "IDLE": "No simulation process is running.",
@@ -298,6 +313,7 @@ def session_status_explanation(state: dict[str, Any]) -> str:
         "STOP_REQUESTED": "A safe stop was requested for this session.",
         "QUEUED": "The session is queued and will start its first ns-3 process shortly.",
         "RUNNING": "A simulation run is active. Status and validated measurements refresh automatically.",
+        "WAITING_FOR_APPROVAL": "A supported configuration recommendation is saved and will not be applied until approved.",
         "TARGET_REACHED": "Validated simulation measurements met the configured target criterion.",
         "EPOCH_LIMIT_REACHED": "The configured number of normal simulation runs has been used.",
         "EXPLORATORY_EPOCH_LIMIT_REACHED": "The separate additional experimental run limit has been used.",
@@ -575,14 +591,14 @@ def render_live_ns3_control(st: Any) -> None:
         ]
         overview_latest = overview_valid[-1] if overview_valid else None
         overview_counts = session_run_counts(session_dir, overview_events, session_state)
-        overview_cols = st.columns(5)
-        overview_cols[0].metric("Selected session", session_status_label(session_state))
-        overview_cols[1].metric("Normal run attempts", f"{overview_counts['normal_attempted']} / {session_state.get('max_epochs', 0)}")
+        st.caption(f"Status · {session_status_label(session_state)} · {session_status_explanation(session_state)}")
+        overview_cols = st.columns(4)
+        overview_cols[0].metric("Normal run attempts", f"{overview_counts['normal_attempted']} / {session_state.get('max_epochs', 0)}")
         extra_limit = (int(session_state.get("max_additional_exploratory_epochs", 0))
                        if session_state.get("run_remaining_experimental_candidates") else 0)
-        overview_cols[2].metric("Extra experimental attempts", f"{overview_counts['experimental_attempted']} / {extra_limit}")
-        overview_cols[3].metric("Target score (0–1)", f"{float(session_state.get('target_qoe', 0.8)):.3f}")
-        overview_cols[4].metric(
+        overview_cols[1].metric("Extra experimental attempts", f"{overview_counts['experimental_attempted']} / {extra_limit}")
+        overview_cols[2].metric("Target score (0–1)", f"{float(session_state.get('target_qoe', 0.8)):.3f}")
+        overview_cols[3].metric(
             "Latest measured score",
             f"{float(overview_latest['measured_qoe_proxy']):.4f}" if overview_latest else "No valid measurement",
         )
@@ -736,11 +752,19 @@ def render_live_ns3_control(st: Any) -> None:
             except ValueError as exc:
                 st.error(str(exc))
                 initial_config = None
-        st.markdown("**Controller and target settings**")
-        mode = st.radio("Controller mode", ["adaptive", "fixed"], horizontal=True,
-                        format_func=lambda value: "Adaptive (measurement-driven)" if value == "adaptive" else "Fixed baseline",
-                        key="live_controller_mode",
-                        help="Adaptive mode selects later configurations from measured results and supported empirical estimates. Fixed mode keeps the selected configuration for each run.")
+        st.markdown("**Predictive controller**")
+        operating_mode = st.radio(
+            "Operating mode", ["Recommend", "Monitor", "Automatic"], index=0,
+            horizontal=True, key="live_operating_mode",
+            help=("Recommend pauses before a supported change until you approve it. Monitor repeats the selected configuration. "
+                  "Automatic applies eligible Band 1 bandwidth changes by restarting ns-3 for the next epoch."),
+        )
+        mode = "fixed" if operating_mode == "Monitor" else "adaptive"
+        st.caption(
+            "Supported automatic action: Band 1 bandwidth, restricted to validated candidate values and the current power/topology. "
+            "It requires a fresh ns-3 process; live in-process reconfiguration is not implemented. "
+            "Power changes, topology exploration and external-campus-model predictions are not used by this controller."
+        )
         target_qoe = st.slider("Target simulated network quality score (0–1)", 0.0, 1.0, 0.80, 0.01,
                                key="live_target_qoe", help="This is a synthetic ns-3 score, not a user survey score.")
         target_tolerance = st.slider("Target tolerance (QoE proxy)", 0.0, 0.05, 0.005, 0.005,
@@ -759,6 +783,11 @@ def render_live_ns3_control(st: Any) -> None:
                                        key="live_maintenance_margin")
         maintenance_hysteresis = st.slider("Maintenance switch hysteresis", 0.0, 0.10, 0.02, 0.005,
                                            key="live_maintenance_hysteresis")
+        minimum_expected_benefit = st.slider(
+            "Minimum expected QoE benefit for a configuration change", 0.0, 0.20, 0.02, 0.01,
+            key="live_minimum_expected_benefit",
+            help="Candidate changes without exact-condition empirical support or this minimum estimated gain are rejected.",
+        )
         st.caption("Two consecutive validated measurements at target minus tolerance establish TARGET_MAINTENANCE. Maintenance evaluates each run separately, with an ns-3 process restart per run.")
         st.markdown("**Run limits and safety options**")
         limit_cols = st.columns(2)
@@ -771,67 +800,14 @@ def render_live_ns3_control(st: Any) -> None:
             help="How many normal configuration changes the adaptive controller may make. This is not the session stop limit.",
         )
         st.caption("After the action budget, adaptive sessions may use eligible exploratory trials if enabled. The epoch limit remains the normal run bound.")
-        if mode == "adaptive":
-            allow_exploratory_candidates = st.checkbox(
-                "Allow exploratory configurations",
-                value=False, key="live_allow_exploratory_candidates",
-                help=("Opt in to trying supported Band 1/power combinations outside the validated campaign. "
-                      "These are exploratory, may fail or reduce QoE, and have no predicted benefit."),
-            )
-            if allow_exploratory_candidates:
-                st.caption("Exploratory configurations can be considered before the normal epoch limit after the action budget; Band 2 and traffic stay fixed.")
-            allow_high_risk_candidates = st.checkbox(
-                "Advanced override: permit high-risk configurations", value=False,
-                key="live_allow_high_risk_candidates",
-                help="Permits exact prior-outage settings and settings matching a repeated outage pattern. Such runs can produce complete outages.",
-            )
-            if allow_high_risk_candidates:
-                st.warning("High-risk override enabled: prior evidence includes complete outages. Results are uncertain and simulation time may be spent on an outage.")
-            allow_repeat_trials = st.checkbox(
-                "Allow repeat trials of configurations already attempted", value=False,
-                key="live_allow_repeat_trials",
-                help="Useful for repeatability checks; repeats consume epochs and may reproduce an outage.",
-            )
-            run_remaining_experimental = st.checkbox(
-                "Run remaining experimental candidates after epoch limit",
-                value=False, key="live_post_epoch_exploration",
-                help=("After the normal epoch limit, optionally run additional untried supported experimental configurations. "
-                      "This uses a separate extra-epoch budget and does not predict improvement."),
-            )
-            if run_remaining_experimental:
-                max_additional_exploratory_epochs = st.number_input(
-                    "Additional experimental epoch limit", 1, 9, 3, 1,
-                    key="live_max_post_epoch_exploration",
-                )
-                st.caption("The normal epoch limit remains unchanged; these extra process restarts are tracked separately.")
-            else:
-                max_additional_exploratory_epochs = 3
-            allow_topology_exploration = st.checkbox(
-                "Allow bounded additional-gNB topology candidates", value=False,
-                key="live_allow_topology_exploration",
-                help=("After same-topology candidates are exhausted, test up to two real multi-cell scenario rebuilds. "
-                      "The structural trial keeps UE count, workload and radio settings fixed; existing UEs are "
-                      "explicitly attached round-robin across the new cells. "
-                      "If a cell-count candidate runs, later same-topology radio tuning is also permitted while budgets remain. "
-                      "These alternatives have no matching campaign performance evidence."),
-            )
-            if allow_topology_exploration:
-                topology_candidate_budget = st.number_input(
-                "Maximum additional topology candidates", 1, 3, 1, 1,
-                    key="live_topology_candidate_budget",
-                )
-                st.caption("Cell-count candidates are unvalidated until their own ns-3 runs complete. They use the same EPC and IP network; no subnet isolation or handover is modeled.")
-            else:
-                topology_candidate_budget = 1
-        else:
-            allow_exploratory_candidates = False
-            allow_high_risk_candidates = False
-            allow_repeat_trials = False
-            run_remaining_experimental = False
-            max_additional_exploratory_epochs = 3
-            allow_topology_exploration = False
-            topology_candidate_budget = 1
-            st.caption("Fixed mode repeats the selected configuration; exploratory action selection is unavailable.")
+        allow_exploratory_candidates = False
+        allow_high_risk_candidates = False
+        allow_repeat_trials = False
+        run_remaining_experimental = False
+        max_additional_exploratory_epochs = 3
+        allow_topology_exploration = False
+        topology_candidate_budget = 1
+        st.caption("Only validated Band 1 bandwidth candidates are eligible in this first release; high-risk, power and topology exploration are disabled.")
         st.markdown("**Reproducibility and process safety**")
         run_cols = st.columns(3)
         rng_seed = run_cols[0].number_input(
@@ -866,6 +842,7 @@ def render_live_ns3_control(st: Any) -> None:
                 target_qoe=float(target_qoe),
                 max_epochs=int(max_epochs),
                 mode=mode,
+                operating_mode=operating_mode,
                 preset_name=preset_name,
                 rng_seed=int(rng_seed), rng_run_start=int(rng_run_start),
                 timeout_seconds=float(timeout_seconds),
@@ -882,6 +859,7 @@ def render_live_ns3_control(st: Any) -> None:
                 stability_validation_epochs=int(stability_validation_epochs),
                 maintenance_margin=float(maintenance_margin),
                 maintenance_hysteresis=float(maintenance_hysteresis),
+                minimum_expected_benefit=float(minimum_expected_benefit),
             )
             # Keep one authoritative active ID and explicitly reset the history widget;
             # its prior widget state otherwise overrides the newly computed default.
@@ -891,7 +869,7 @@ def render_live_ns3_control(st: Any) -> None:
         except (OSError, ValueError, RuntimeError) as exc:
             st.error(f"Could not start the simulation: {exc}")
 
-    if session_dir is not None and session_state.get("status") in {"QUEUED", "RUNNING"}:
+    if session_dir is not None and session_state.get("status") in {"QUEUED", "RUNNING", "WAITING_FOR_APPROVAL"}:
         if st.button("Stop selected session safely", key=f"live_stop_{selected_id}"):
             request_session_stop(session_dir)
             st.warning("Stop requested. The owned ns-3 process will be stopped safely; no point is added for an invalid or cancelled run.")
@@ -915,7 +893,7 @@ def render_live_ns3_control(st: Any) -> None:
             return
         run_counts = session_run_counts(folder, events, state)
         st.subheader("Live performance")
-        status_cols = st.columns(4)
+        status_cols = st.columns(5)
         status_cols[0].metric("Session status", session_status_label(state))
         epoch_label = f"Normal {run_counts['normal_attempted']} / {state.get('max_epochs', 0)}"
         if state.get("is_post_epoch_exploration"):
@@ -924,6 +902,7 @@ def render_live_ns3_control(st: Any) -> None:
         status_cols[1].metric("Run-limit progress", epoch_label)
         status_cols[2].metric("Target score (0–1)", f"{state.get('target_qoe', 0.8):.3f}")
         status_cols[3].metric("Elapsed this epoch", f"{float(state.get('current_elapsed_seconds', 0)):.1f} s")
+        status_cols[4].metric("Operating mode", state.get("operating_mode", "Legacy"))
         st.caption(_run_count_caption(run_counts, state))
         phase = state.get("controller_phase", "TARGET_SEEKING")
         target = float(state.get("target_qoe", 0.8))
@@ -947,6 +926,28 @@ def render_live_ns3_control(st: Any) -> None:
                    f"extra limit={state.get('max_additional_exploratory_epochs', 0)}.")
         current = state.get("current_config") or {}
         st.write("**Current configuration:**", _config_caption(current))
+        if state.get("status") == "WAITING_FOR_APPROVAL" and state.get("pending_action"):
+            pending = state["pending_action"]
+            st.warning(
+                f"Recommendation awaiting approval: Band 1 bandwidth "
+                f"{pending['previous_config'].get('bandwidth_band1_mhz')} → "
+                f"{pending['proposed_config'].get('bandwidth_band1_mhz')} MHz. "
+                "If approved, this takes effect only when the next ns-3 process starts."
+            )
+            st.write(pending.get("rationale", "No rationale recorded."))
+            approval_cols = st.columns(2)
+            if approval_cols[0].button("Approve restart action", type="primary", key=f"approve_{selected_id}"):
+                try:
+                    request_action_approval(session_dir, approve=True)
+                    st.success("Action approved. Waiting for the next ns-3 process to apply and verify it.")
+                except (OSError, ValueError) as exc:
+                    st.error(f"Could not approve this action: {exc}")
+            if approval_cols[1].button("Reject action", key=f"reject_{selected_id}"):
+                try:
+                    request_action_approval(session_dir, approve=False)
+                    st.info("Action rejected. The current configuration will be retained.")
+                except (OSError, ValueError) as exc:
+                    st.error(f"Could not reject this action: {exc}")
 
         valid_events = [
             event for event in events
@@ -978,6 +979,35 @@ def render_live_ns3_control(st: Any) -> None:
                            f"variation band=[{latest.get('predicted_qoe_lower') if latest.get('predicted_qoe_lower') is not None else '—'}, "
                            f"{latest.get('predicted_qoe_upper') if latest.get('predicted_qoe_upper') is not None else '—'}]; "
                            f"{latest.get('prediction_confidence', 'uncertainty unavailable')}.")
+            forecast = latest.get("forecast") or {}
+            freshness = telemetry_freshness(latest, max_age_seconds=max(
+                60.0, min(600.0, float(state.get("timeout_seconds", 120.0)) * 2.0),
+            ))
+            forecast_cols = st.columns(4)
+            forecast_cols[0].metric("QoE now · measured", f"{float(latest['measured_qoe_proxy']):.4f}")
+            if forecast.get("predicted_qoe") is not None:
+                forecast_cols[1].metric(
+                    f"QoE forecast · +{forecast.get('horizon_epochs', 1)} epoch",
+                    f"{float(forecast['predicted_qoe']):.4f}",
+                )
+            else:
+                forecast_cols[1].metric("QoE forecast", "Insufficient history")
+            forecast_cols[2].metric("Users forecast at risk", str(len(forecast.get("at_risk_ue_ids", []))))
+            forecast_cols[3].metric("Telemetry", f"{freshness['status']} · {freshness['age_seconds']:.0f}s" if freshness["age_seconds"] is not None else freshness["status"])
+            st.caption(
+                f"Forecast status: {forecast.get('status', 'UNAVAILABLE')} · "
+                f"{forecast.get('reason', 'No forecast available.')} · "
+                f"uncertainty: {forecast.get('uncertainty', 'unavailable')}. "
+                "Trend forecast is a baseline estimate, not a validated guarantee."
+            )
+            if forecast.get("users"):
+                st.dataframe(pd.DataFrame([
+                    {"UE": row["ue_id"], "Current QoE": row["current_qoe"],
+                     "Forecast QoE": row["predicted_qoe"], "Forecast interval low": row["lower"],
+                     "Forecast interval high": row["upper"], "At risk": row["at_risk"],
+                     "Reason": row["reason"]}
+                    for row in forecast["users"]
+                ]), use_container_width=True, hide_index=True)
         elif events:
             latest_event = events[-1]
             st.warning(
@@ -1189,6 +1219,12 @@ def render_live_ns3_control(st: Any) -> None:
             )
         else:
             action_col.caption("Actions will appear after a validated measurement.")
+        interventions = read_intervention_events(folder)
+        with action_col.expander("Intervention ledger", expanded=False):
+            if interventions:
+                action_col.dataframe(pd.DataFrame(interventions), use_container_width=True, hide_index=True)
+            else:
+                action_col.caption("No configuration intervention has been proposed in this session.")
         upcoming = state.get("next_prediction") or {}
         if upcoming.get("qoe") is not None:
             action_col.metric("Predicted next-epoch QoE proxy", f"{upcoming['qoe']:.4f}")

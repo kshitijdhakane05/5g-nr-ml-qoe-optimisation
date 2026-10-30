@@ -6,7 +6,7 @@ import sys
 
 
 class LiveNs3DashboardSmokeTests(unittest.TestCase):
-    def test_live_page_renders_controls_and_qoe_chart_without_errors(self):
+    def test_live_page_renders_real_time_controls_and_metrics_without_errors(self):
         # test_dashboard installs a Streamlit stub and imports dashboard modules
         # against it. AppTest needs both the real package and fresh UI modules.
         saved_modules = {
@@ -20,63 +20,68 @@ class LiveNs3DashboardSmokeTests(unittest.TestCase):
 
             app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run(timeout=30)
             self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
-            self.assertIn("Live Simulator", [x.value for x in app.title])
-            self.assertIn("📡 [Project Name]", [x.value for x in app.title])
-            self.assertIn("Start ns-3 simulation/controller", [x.label for x in app.button])
-            self.assertGreaterEqual(len(app.get("plotly_chart")), 1)
-            self.assertTrue(any("Target simulated network quality score (0–1)" == m.label for m in app.slider))
+            self.assertIn("Live network simulation", [x.value for x in app.title])
+            self.assertIn("📡 5G QoE Lab", [x.value for x in app.title])
+            self.assertIn("Start live simulation", [x.label for x in app.button])
+            self.assertGreaterEqual(len(app.get("plotly_chart")), 4)
+            for graph_heading in ("QoE trend", "Throughput", "Delay and jitter", "Packet loss"):
+                self.assertIn(graph_heading, [x.value for x in app.subheader])
+            streamlit_config = Path(__file__).resolve().parents[1] / ".streamlit" / "config.toml"
+            self.assertIn('base = "dark"', streamlit_config.read_text())
+            self.assertTrue(any("QoE target" == m.label for m in app.slider))
+            self.assertTrue(any("QoE score and measurement units" == e.label for e in app.expander))
+            self.assertTrue(any(h.value in {"Active network and traffic settings", "Last verified network settings"}
+                                for h in app.subheader))
+            self.assertTrue(any("Live UE topology and state" == h.value for h in app.subheader))
+            self.assertTrue(any("Select a UE marker on the topology" in c.value for c in app.caption))
+            self.assertTrue(any(h.value in {"Live network feed", "Recent measurement history"} for h in app.subheader))
+            self.assertTrue(any("Live controller and action feed" == h.value for h in app.subheader))
             def navigation():
-                return next(x for x in app.radio if x.label == "Main navigation")
+                return next(x for x in app.radio if x.label == "Workspace")
 
             self.assertEqual(navigation().options, [
-                "🛰️ Live Simulator", "📊 Overview", "🧪 Experiments", "📈 Analytics", "🧰 More tools",
+                "Run simulation", "Overview", "Experiments", "Analytics", "Tools",
             ])
-            preset_box = next(x for x in app.selectbox if x.label == "Preset test scenario")
-            self.assertIn("Baseline", preset_box.options)
-            self.assertIn("Current session", [x.value for x in app.subheader])
-            self.assertIn("Scenario configuration", [x.value for x in app.subheader])
-            self.assertIn("Simulation controls", [x.value for x in app.subheader])
-            checkbox_labels = [x.label for x in app.checkbox]
-            for label in (
-                "Allow exploratory configurations",
-                "Advanced override: permit high-risk configurations",
-                "Allow repeat trials of configurations already attempted",
-                "Run remaining experimental candidates after epoch limit",
-            ):
-                self.assertIn(label, checkbox_labels)
-            number_input_labels = [x.label for x in app.number_input]
-            self.assertIn("Maximum number of normal simulation runs", number_input_labels)
-            self.assertIn("Normal adaptive action budget", number_input_labels)
-            self.assertIn("Per-run timeout (seconds)", number_input_labels)
-            config_mode = next(x for x in app.radio if x.label == "Scenario configuration")
-            config_mode.set_value("Custom configuration").run(timeout=30)
-            self.assertTrue(any(x.label == "Band 2 bandwidth (MHz)" for x in app.selectbox))
-            self.assertTrue(any(x.label == "Best-effort rate (packets/s)" for x in app.number_input))
+            mode = next(x for x in app.selectbox if x.label == "Controller mode")
+            self.assertEqual(mode.value, "Recommend")
+            self.assertTrue(any(x.label == "Band 1 bandwidth · startup only" for x in app.selectbox))
+            self.assertTrue(any(x.label == "Best-effort packet rate · packets/s per UE" for x in app.number_input))
+            self.assertTrue(any(x.label == "Low-latency packet rate · packets/s per UE" for x in app.number_input))
 
-            navigation().set_value("📊 Overview").run(timeout=30)
+            navigation().set_value("Overview").run(timeout=30)
             self.assertIn("Network overview", [x.value for x in app.title])
             self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
-            navigation().set_value("🧪 Experiments").run(timeout=30)
+            navigation().set_value("Experiments").run(timeout=30)
             self.assertIn("Experiments", [x.value for x in app.title])
             self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
-            navigation().set_value("📈 Analytics").run(timeout=30)
+            navigation().set_value("Analytics").run(timeout=30)
             self.assertIn("Analytics", [x.value for x in app.title])
             self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
-            navigation().set_value("🧰 More tools").run(timeout=30)
-            tools_box = next(x for x in app.selectbox if x.label == "Supporting tools")
-            self.assertIn("🤖 QoE Predictor", tools_box.options)
-            self.assertIn("⚙️ Network Optimiser", tools_box.options)
-            self.assertIn("🔁 Closed-Loop Verification", tools_box.options)
+            navigation().set_value("Tools").run(timeout=30)
+            tools_box = next(x for x in app.selectbox if x.label == "Additional tools")
+            self.assertIn("🤖 QoE Predictor (offline dataset)", tools_box.options)
+            self.assertIn("⚙️ Network Optimiser (offline analysis)", tools_box.options)
+            self.assertIn("🔁 Closed-Loop Verification (single run)", tools_box.options)
+            self.assertIn("🧠 Live Hybrid Model & Dataset Provenance", tools_box.options)
+            self.assertIn("🌐 External 5G Campus Dataset Benchmark", tools_box.options)
             for option, expected_title in (
                 ("🔍 Simulation Explorer", "🔍 Simulation Data Explorer"),
-                ("🤖 QoE Predictor", "🤖 QoE Predictor"),
-                ("⚙️ Network Optimiser", "⚙️ Network Optimiser"),
-                ("🔁 Closed-Loop Verification", "🔁 Closed-Loop Verification"),
+                ("🤖 QoE Predictor (offline dataset)", "🤖 QoE Predictor · Offline dataset"),
+                ("⚙️ Network Optimiser (offline analysis)", "⚙️ Network Optimiser · Offline analysis"),
+                ("🔁 Closed-Loop Verification (single run)", "🔁 Closed-Loop Verification · Single run"),
                 ("🧪 Experimental KPI Results (offline)", "🧪 Experimental KPI results (offline)"),
+                ("🧠 Live Hybrid Model & Dataset Provenance", "Live Hybrid Model & Dataset Provenance"),
+                ("🌐 External 5G Campus Dataset Benchmark", "External 5G Campus Dataset Benchmark"),
             ):
-                next(x for x in app.selectbox if x.label == "Supporting tools").set_value(option).run(timeout=30)
+                next(x for x in app.selectbox if x.label == "Additional tools").set_value(option).run(timeout=30)
                 self.assertIn(expected_title, [x.value for x in app.title])
                 self.assertEqual(len(app.exception), 0, [e.message for e in app.exception])
+
+            overview_link = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+            overview_link.query_params["view"] = "overview"
+            overview_link.run(timeout=30)
+            self.assertEqual(len(overview_link.exception), 0, [e.message for e in overview_link.exception])
+            self.assertIn("Network overview", [x.value for x in overview_link.title])
         finally:
             for module_name in list(sys.modules):
                 if (module_name == "streamlit" or module_name.startswith("streamlit.")
